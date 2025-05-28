@@ -1,7 +1,10 @@
-import datetime
+from datetime import datetime, date, time, timedelta
 import os.path
 import zoneinfo
 from tzlocal import get_localzone_name
+import sqlite3
+import sys
+from typing import Tuple
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -9,33 +12,120 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+
+class Event:
+    def __init__(self, summary: str,
+                 start_dt: datetime,
+                 end_dt: datetime,
+                 is_flexible: bool,
+                 valid_start_dt: datetime,
+                 valid_end_dt: datetime):
+
+        self.start_dt: datetime = start_dt
+        self.end_dt: datetime = end_dt
+        self.duration: float = (end_dt - start_dt).total_seconds()
+        self.is_flexible: bool = is_flexible
+        self.valid_start_dt: datetime = valid_start_dt
+        self.valid_end_dt: datetime = valid_end_dt
+        self.summary: str = summary
+
+
+    def __str__(self):
+        return f"Event {self.summary} ({self.start_dt} to {self.end_dt})"
+
+    def __repr__(self):
+        return (f"Event(summary: {self.summary},\n"
+                f"start_dt: {self.start_dt}\n"
+                f"end_dt: {self.end_dt}\n"
+                f"duration: {self.duration}\n"
+                f"is_flexible: {self.is_flexible}\n"
+                f"valid_start_dt: {self.valid_start_dt}\n"
+                f"valid_end_dt: {self.valid_end_dt}\n)")
+
+
+    def get_start_end_dt(self) -> Tuple[datetime, datetime]:
+        return self.start_dt, self.end_dt
+
+    def get_valid_range(self) -> Tuple[datetime, datetime]:
+        return self.valid_start_dt, self.valid_end_dt
+
+
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
-def get_system_tz() -> str | None:
+def get_system_tz() -> str:
     #Gets local timezone from system
     try:
         return get_localzone_name()
     except Exception as e:
         print(f"Error getting system timezone: {e}")
+        sys.exit(1)
 
 #Store local timezone in global var
 TIMEZONE = get_system_tz()
 
-def convert_str_to_time(time_str: str) -> datetime.time | None:
+def create_table()-> None:
+    conn = sqlite3.connect(f"events.db")
+    print("Opened database successfully")
+
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary TEXT NOT NULL,
+    event_start_dt TEXT NOT NULL,
+    event_end_dt TEXT NOT NULL,
+    is_flexible INTEGER NOT NULL,
+    valid_start_dt TEXT,
+    valid_end_dt TEXT,
+    timezone TEXT NOT NULL
+    )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+
+def add_event_to_db(event: Event) -> None:
+    conn = sqlite3.connect(f"events.db")
+    cursor = conn.cursor()
+    print("Opened database successfully")
+
+    cursor.execute('''
+        INSERT INTO events (summary, event_start_dt, event_end_dt, is_flexible, valid_start_dt, valid_end_dt, timezone)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (event.summary,
+          event.start_dt.isoformat(),
+          event.end_dt.isoformat(),
+          int(event.is_flexible),
+          event.valid_start_dt.isoformat(),
+          event.valid_end_dt.isoformat(),
+          TIMEZONE))
+
+    conn.commit()
+    conn.close()
+
+    print("Event added to database successfully")
+
+
+
+
+
+def convert_str_to_time(time_str: str) -> time:
     #Converts string input in the format HH:MM into timezone.time object
     try:
-        return datetime.datetime.strptime(time_str, "%H:%M").time()
+        return datetime.strptime(time_str, "%H:%M").time()
     except ValueError as e:
         print(f"Invalid time format: {e}")
+        sys.exit(1)
 
-def convert_str_to_date(date_str: str) -> datetime.date | None:
+def convert_str_to_date(date_str: str) -> date:
     #Converts string input in the format dd-mm-YYYY to a datetime.date object
     try:
-        return datetime.datetime.strptime(date_str, "%d-%m-%Y").date()
+        return datetime.strptime(date_str, "%d-%m-%Y").date()
     except ValueError as e:
         print(f"Invalid date format: {e}")
+        sys.exit(1)
 
 
 def authenticate():
@@ -49,7 +139,10 @@ def authenticate():
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"Failed to refresh token: {e}")
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
                 "credentials.json", SCOPES
@@ -68,9 +161,9 @@ def get_events_on_day(creds, date_str: str):
         service = build("calendar", "v3", credentials=creds)
 
         #Convert string date input to the correct datetime format
-        date = convert_str_to_date(date_str)
-        start_datetime = datetime.datetime.combine(date, datetime.time.min).isoformat() + 'Z'
-        end_datetime = datetime.datetime.combine(date, datetime.time.max).isoformat() + 'Z'
+        day = convert_str_to_date(date_str)
+        start_datetime = datetime.combine(day, time.min).isoformat() + 'Z'
+        end_datetime = datetime.combine(day, time.max).isoformat() + 'Z'
 
         events_result = service.events().list(
             calendarId='primary',
@@ -89,22 +182,31 @@ def get_events_on_day(creds, date_str: str):
         print(f"An error occurred: {error}")
         quit()
 
+def create_event(date_str: str, start_time_str: str, duration: int, is_flexible: bool, summary: str) -> Event:
+    day = convert_str_to_date(date_str)
+    start_time = convert_str_to_time(start_time_str)
+    start_dt = datetime.combine(day, start_time, tzinfo=zoneinfo.ZoneInfo(TIMEZONE))
+    end_dt = start_dt + timedelta(minutes=duration)
+    event = None
 
-def add_event(creds, date_str: str, start_time_str: str, duration: int, summary: str)-> None:
+    if not is_flexible:
+        event = Event(summary, start_dt, end_dt, is_flexible, start_dt, end_dt)
+    else:
+        pass
+
+    return event
+
+def add_event_to_calendar(creds, event: Event)-> None:
     #Adds an event to the Google calendar
 
     #Convert date and time to the correct format for request body
-    date = convert_str_to_date(date_str)
-    start_time = convert_str_to_time(start_time_str)
-    start_dt = datetime.datetime.combine(date, start_time, tzinfo=zoneinfo.ZoneInfo(TIMEZONE))
-    end_dt = start_dt + datetime.timedelta(hours=duration)
-    start_formatted = start_dt.isoformat()
-    end_formatted = end_dt.isoformat()
+    start_formatted = event.start_dt.isoformat()
+    end_formatted = event.end_dt.isoformat()
 
 
     #Create request body
     event = {
-        'summary': summary,
+        'summary': event.summary,
         'start': {
             'dateTime': start_formatted,
             'timeZone': TIMEZONE,
@@ -126,7 +228,7 @@ def add_event(creds, date_str: str, start_time_str: str, duration: int, summary:
 
     except HttpError as error:
         print(f"An error occurred: {error}")
-        quit()
+        sys.exit(1)
 
 def print_events(events):
     #Prints list of events to the terminal (for debug purposes)
@@ -141,10 +243,15 @@ def print_events(events):
 def main():
     creds = authenticate()
 
-    add_event(creds, "24-05-2025", "21:00", 2, "Test API")
+    new_event = create_event("28-05-2025", "21:00", 30, False, "Test API")
+    print(new_event)
+    #add_event_to_calendar(creds, new_event)
+    add_event_to_db(new_event)
 
-    events = get_events_on_day(creds, "24-05-2025")
-    print_events(events)
+    #events = get_events_on_day(creds, "24-05-2025")
+    #print_events(events)
+
+    #create_table()
 
 if __name__ == "__main__":
   main()

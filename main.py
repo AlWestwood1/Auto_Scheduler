@@ -89,7 +89,17 @@ def create_table()-> None:
 def add_event_to_db(event: Event) -> None:
     conn = sqlite3.connect(f"events.db")
     cursor = conn.cursor()
-    print("Opened database successfully")
+
+    #Check if event already exists in the DB
+    cursor.execute('''
+        SELECT 1 FROM events
+        WHERE summary = ? AND event_start_dt = ? AND event_end_dt = ?
+        LIMIT 1
+    ''', (event.summary, event.start_dt.isoformat(), event.end_dt.isoformat()))
+
+    if cursor.fetchone():
+        print(f"Event with name '{event.summary}' already exists in database")
+        return
 
     cursor.execute('''
         INSERT INTO events (summary, event_start_dt, event_end_dt, is_flexible, valid_start_dt, valid_end_dt, timezone)
@@ -182,7 +192,7 @@ def get_events_on_day(creds, date_str: str):
         print(f"An error occurred: {error}")
         quit()
 
-def create_event(date_str: str, start_time_str: str, duration: int, is_flexible: bool, summary: str) -> Event:
+def user_create_event(date_str: str, start_time_str: str, duration: int, is_flexible: bool, summary: str) -> Event:
     day = convert_str_to_date(date_str)
     start_time = convert_str_to_time(start_time_str)
     start_dt = datetime.combine(day, start_time, tzinfo=zoneinfo.ZoneInfo(TIMEZONE))
@@ -240,18 +250,32 @@ def print_events(events):
       start = event["start"].get("dateTime", event["start"].get("date"))
       print(start, event["summary"])
 
+def add_events_on_day_to_db(creds, date_str: str):
+    #Adds existing events from the google calendar on a given day to the DB
+    events = get_events_on_day(creds, date_str)
+    for event in events:
+        start_str = event["start"].get("dateTime", event["start"].get("date"))
+        end_str = event["end"].get("dateTime", event["end"].get("date"))
+
+        start_dt = datetime.fromisoformat(start_str)
+        end_dt = datetime.fromisoformat(end_str)
+
+        add_event_to_db(Event(event["summary"], start_dt, end_dt, False, start_dt, end_dt))
+
+
+
 def main():
     creds = authenticate()
 
-    new_event = create_event("28-05-2025", "21:00", 30, False, "Test API")
-    print(new_event)
+    #new_event = create_event("31-05-2025", "16:00", 30, False, "Test API")
+    #print(new_event)
     #add_event_to_calendar(creds, new_event)
-    add_event_to_db(new_event)
+    #add_event_to_db(new_event)
 
-    #events = get_events_on_day(creds, "24-05-2025")
-    #print_events(events)
+    events = get_events_on_day(creds, "18-06-2025")
+    add_events_on_day_to_db(creds, "18-06-2025")
+    print_events(events)
 
-    #create_table()
 
 if __name__ == "__main__":
   main()

@@ -16,35 +16,61 @@ from googleapiclient.errors import HttpError
 class Event:
     def __init__(self, summary: str,
                  start_dt: datetime,
-                 end_dt: datetime,
-                 is_flexible: bool,
-                 valid_start_dt: datetime,
-                 valid_end_dt: datetime):
+                 end_dt: datetime,):
 
         self.start_dt: datetime = start_dt
         self.end_dt: datetime = end_dt
         self.duration: float = (end_dt - start_dt).total_seconds()
-        self.is_flexible: bool = is_flexible
-        self.valid_start_dt: datetime = valid_start_dt
-        self.valid_end_dt: datetime = valid_end_dt
         self.summary: str = summary
-
-
-    def __str__(self):
-        return f"Event {self.summary} ({self.start_dt} to {self.end_dt})"
-
-    def __repr__(self):
-        return (f"Event(summary: {self.summary},\n"
-                f"start_dt: {self.start_dt}\n"
-                f"end_dt: {self.end_dt}\n"
-                f"duration: {self.duration}\n"
-                f"is_flexible: {self.is_flexible}\n"
-                f"valid_start_dt: {self.valid_start_dt}\n"
-                f"valid_end_dt: {self.valid_end_dt}\n)")
+        self.valid_start_dt: datetime = start_dt
+        self.valid_end_dt: datetime = end_dt
 
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
         return self.start_dt, self.end_dt
+
+class FixedEvent(Event):
+    def __init__(self, summary: str,
+                 start_dt: datetime,
+                 end_dt: datetime):
+
+        super().__init__(summary, start_dt, end_dt)
+        self.is_flexible: bool = False
+        self.valid_start_dt: datetime = start_dt
+        self.valid_end_dt: datetime = end_dt
+
+    def __str__(self):
+        return f"Fixed Event {self.summary} ({self.start_dt} to {self.end_dt})"
+
+    def __repr__(self):
+        return (f"FixedEvent(summary: {self.summary},\n"
+                f"start_dt: {self.start_dt}\n"
+                f"end_dt: {self.end_dt}\n"
+                f"duration: {self.duration}")
+
+
+class FlexibleEvent(Event):
+    def __init__(self, summary: str,
+                 start_dt: datetime,
+                 end_dt: datetime,
+                 valid_start_dt: datetime,
+                 valid_end_dt: datetime):
+
+        super().__init__(summary, start_dt, end_dt)
+        self.is_flexible: bool = True
+        self.valid_start_dt: datetime = valid_start_dt
+        self.valid_end_dt: datetime = valid_end_dt
+
+    def __str__(self):
+        return f"Flexible Event {self.summary} ({self.start_dt} to {self.end_dt}) (Valid range: {self.valid_start_dt} to {self.valid_end_dt})"
+
+    def __repr__(self):
+        return (f"FlexibleEvent(summary: {self.summary},\n"
+                f"start_dt: {self.start_dt}\n"
+                f"end_dt: {self.end_dt}\n"
+                f"duration: {self.duration}\n"
+                f"valid_start_dt: {self.valid_start_dt}\n"
+                f"valid_end_dt: {self.valid_end_dt})")
 
     def get_valid_range(self) -> Tuple[datetime, datetime]:
         return self.valid_start_dt, self.valid_end_dt
@@ -75,7 +101,6 @@ def create_table()-> None:
     summary TEXT NOT NULL,
     event_start_dt TEXT NOT NULL,
     event_end_dt TEXT NOT NULL,
-    is_flexible INTEGER NOT NULL,
     valid_start_dt TEXT,
     valid_end_dt TEXT,
     timezone TEXT NOT NULL
@@ -102,12 +127,11 @@ def add_event_to_db(event: Event) -> None:
         return
 
     cursor.execute('''
-        INSERT INTO events (summary, event_start_dt, event_end_dt, is_flexible, valid_start_dt, valid_end_dt, timezone)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO events (summary, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, timezone)
+        VALUES (?, ?, ?, ?, ?, ?)
     ''', (event.summary,
           event.start_dt.isoformat(),
           event.end_dt.isoformat(),
-          int(event.is_flexible),
           event.valid_start_dt.isoformat(),
           event.valid_end_dt.isoformat(),
           TIMEZONE))
@@ -200,7 +224,7 @@ def user_create_event(date_str: str, start_time_str: str, duration: int, is_flex
     event = None
 
     if not is_flexible:
-        event = Event(summary, start_dt, end_dt, is_flexible, start_dt, end_dt)
+        event = FixedEvent(summary, start_dt, end_dt)
     else:
         pass
 
@@ -260,24 +284,21 @@ def add_events_on_day_to_db(creds, date_str: str):
         start_dt = datetime.fromisoformat(start_str)
         end_dt = datetime.fromisoformat(end_str)
 
-        add_event_to_db(Event(event["summary"], start_dt, end_dt, False, start_dt, end_dt))
+        add_event_to_db(FixedEvent(event["summary"], start_dt, end_dt))
 
 
 
 def main():
     creds = authenticate()
 
-    #new_event = create_event("31-05-2025", "16:00", 30, False, "Test API")
+    new_event = user_create_event("21-06-2025", "16:00", 30, False, "Test API")
     #print(new_event)
-    #add_event_to_calendar(creds, new_event)
-    #add_event_to_db(new_event)
+    add_event_to_calendar(creds, new_event)
 
-    events = get_events_on_day(creds, "18-06-2025")
-    add_events_on_day_to_db(creds, "18-06-2025")
-    print_events(events)
+    add_events_on_day_to_db(creds, "21-06-2025")
 
 
 if __name__ == "__main__":
-  main()
+    main()
 
 

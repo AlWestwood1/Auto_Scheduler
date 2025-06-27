@@ -499,7 +499,7 @@
     <routine id="190" parent="1" name="fts5"/>
     <schema id="191" parent="1" name="main">
       <Current>1</Current>
-      <LastIntrospectionLocalTimestamp>2025-06-21.13:29:38</LastIntrospectionLocalTimestamp>
+      <LastIntrospectionLocalTimestamp>2025-06-27.14:37:53</LastIntrospectionLocalTimestamp>
     </schema>
     <argument id="192" parent="16">
       <ArgumentDirection>R</ArgumentDirection>
@@ -1607,57 +1607,67 @@
       <Position>2</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="560" parent="555" name="event_start_dt">
+    <column id="560" parent="555" name="is_flexible">
       <NotNull>1</NotNull>
       <Position>3</Position>
-      <StoredType>TEXT|0s</StoredType>
+      <StoredType>INTEGER|0s</StoredType>
     </column>
-    <column id="561" parent="555" name="event_end_dt">
+    <column id="561" parent="555" name="event_start_dt">
       <NotNull>1</NotNull>
       <Position>4</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="562" parent="555" name="valid_start_dt">
+    <column id="562" parent="555" name="event_end_dt">
+      <NotNull>1</NotNull>
       <Position>5</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="563" parent="555" name="valid_end_dt">
+    <column id="563" parent="555" name="valid_start_dt">
       <Position>6</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="564" parent="555" name="timezone">
-      <NotNull>1</NotNull>
+    <column id="564" parent="555" name="valid_end_dt">
       <Position>7</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <key id="565" parent="555">
+    <column id="565" parent="555" name="timezone">
+      <NotNull>1</NotNull>
+      <Position>8</Position>
+      <StoredType>TEXT|0s</StoredType>
+    </column>
+    <column id="566" parent="555" name="last_updated">
+      <NotNull>1</NotNull>
+      <Position>9</Position>
+      <StoredType>TEXT|0s</StoredType>
+    </column>
+    <key id="567" parent="555">
       <ColNames>id</ColNames>
       <Primary>1</Primary>
     </key>
-    <column id="566" parent="556" name="type">
+    <column id="568" parent="556" name="type">
       <Position>1</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="567" parent="556" name="name">
+    <column id="569" parent="556" name="name">
       <Position>2</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="568" parent="556" name="tbl_name">
+    <column id="570" parent="556" name="tbl_name">
       <Position>3</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="569" parent="556" name="rootpage">
+    <column id="571" parent="556" name="rootpage">
       <Position>4</Position>
       <StoredType>INT|0s</StoredType>
     </column>
-    <column id="570" parent="556" name="sql">
+    <column id="572" parent="556" name="sql">
       <Position>5</Position>
       <StoredType>TEXT|0s</StoredType>
     </column>
-    <column id="571" parent="557" name="name">
+    <column id="573" parent="557" name="name">
       <Position>1</Position>
     </column>
-    <column id="572" parent="557" name="seq">
+    <column id="574" parent="557" name="seq">
       <Position>2</Position>
     </column>
   </database-model>

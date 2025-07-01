@@ -31,10 +31,18 @@ class Event(ABC):
 
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
+        """
+        Returns start_dt and end_dt
+        :return: start_dt, end_dt
+        """
         return self.start_dt, self.end_dt
 
     def add_to_calendar(self, creds) -> None:
-        # Adds an event to the Google calendar
+        """
+        Adds an event to the Google calendar
+        :param creds: Google API credentials
+        :return: None
+        """
 
         # Convert date and time to the correct format for request body
         start_formatted = self.start_dt.isoformat()
@@ -66,10 +74,17 @@ class Event(ABC):
             sys.exit(1)
 
     def is_duplicate(self, db_name: str) -> bool:
+        """
+        Checks whether an event already exists in the database
+        :param db_name: database file name
+        :return: True if event already exists, False otherwise
+        """
+
+        #Connect to db
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
 
-        # Check if event already exists in the DB
+        # Check if event with same name, start time and end time exists in the DB
         cursor.execute('''
                        SELECT 1
                        FROM events
@@ -79,6 +94,7 @@ class Event(ABC):
                        LIMIT 1
                        ''', (self.summary, self.start_dt.isoformat(), self.end_dt.isoformat()))
 
+        #If it exists, update the 'last modified' column of the entry in the DB and close connection (return True)
         if cursor.fetchone():
             print(f"Event with name '{self.summary}' already exists in database")
             cursor.execute('''
@@ -91,18 +107,29 @@ class Event(ABC):
             conn.close()
             return True
 
+        #If it doesn't exist, close connection and return False
+
         conn.commit()
         conn.close()
 
         return False
 
     def add_to_db(self, db_name: str) -> bool:
+        """
+        Adds an event to the database
+        :param db_name: database file name
+        :return: True if added to the database successfully, False otherwise
+        """
+
+        #If the event is a duplicate, return False
         if self.is_duplicate(db_name):
             return False
 
+        #Connect to the DB
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
 
+        #Add a new row with event params into the DB
         cursor.execute('''
                        INSERT INTO events (summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt,
                                            valid_end_dt, timezone, last_updated)
@@ -116,14 +143,25 @@ class Event(ABC):
                              TIMEZONE,
                              datetime.now().isoformat()))
 
+        #Close connection to DB
         conn.commit()
         conn.close()
 
+        #Print success message and return True
         print("Event added to database successfully")
         return True
 
     def submit_event(self, creds, db_name) -> None:
+        """
+        Adds an event to the database and google calendar
+        :param creds: Google API credentials
+        :param db_name: database file name
+        :return: None
+        """
+        #Add event to database, return whether it was added successfully
         valid = self.add_to_db(db_name)
+
+        #If event was added to the DB successfully, add to the Google Calendar
         if valid:
             self.add_to_calendar(creds)
             print(f"Submitted event {self.summary}")
@@ -172,6 +210,11 @@ class FlexibleEvent(Event):
                 f"valid_end_dt: {self.valid_end_dt})")
 
     def get_valid_range(self) -> Tuple[datetime, datetime]:
+        """
+        Gets valid start and end datetimes for the flexible event
+        (this is NOT the event start and end times, but the range in which the flexible event can be created in)
+        :return: valid start and end datetimes for the flexible event
+        """
         return self.valid_start_dt, self.valid_end_dt
 
 
@@ -181,6 +224,13 @@ class EventBuilder(ABC):
 
     @staticmethod
     def _generate_dts(date_str: str, start_time_str: str, end_time_str: str) -> Tuple[datetime, datetime]:
+        """
+        Creates start and end datetimes from the string dates and times provided by the user input
+        :param date_str: String representation of the event date
+        :param start_time_str: String representation of the start time
+        :param end_time_str: String representation of the end time
+        :return: Datetime representation of the start and end datetimes
+        """
         day = convert_str_to_date(date_str)
         start_time = convert_str_to_time(start_time_str)
         end_time = convert_str_to_time(end_time_str)
@@ -194,7 +244,19 @@ class FixedEventBuilder(EventBuilder):
         super().__init__()
 
     def create_fixed_event(self, date_str: str, start_time_str: str, end_time_str: str, summary: str) -> FixedEvent:
+        """
+        Creates a fixed event from the input parameters
+        :param date_str: String representation of the event date
+        :param start_time_str: String representation of the start time
+        :param end_time_str: String representation of the end time
+        :param summary: Event summary
+        :return: FixedEvent object containing event information provided in input args
+        """
+
+        #Generate datetime representation of start and end dates
         start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
+
+        #Create and return FixedEvent
         return FixedEvent(summary, start_dt, end_dt)
 
 
@@ -203,15 +265,33 @@ class FlexibleEventBuilder(EventBuilder):
         super().__init__()
 
     def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
+        """
+        Creates a flexible event from the input parameters
+        :param date_str: String representation of the event date
+        :param valid_start_time_str: String representation of the start of the valid time range
+        :param valid_end_time_str: String representation of the end of the valid time range
+        :param duration: Duration of the flexible event
+        :param summary: Event summary
+        :return: FlexibleEvent object containing event information provided in input args
+        """
+
+        #Generate valid timerange datetimes from the valid start and end dates/times
         valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
+        #Initalise the event end datetime as the valid start datetime + duration
         init_end_dt = valid_start_dt + timedelta(minutes=duration)
 
+        #Create FlexibleEvent from args (event will start at valid_start_dt and last duration minutes)
         return FlexibleEvent(summary, valid_start_dt, init_end_dt, valid_start_dt, valid_end_dt)
 
 
 
 def get_system_tz() -> str:
-    #Gets local timezone from system
+    """
+    Gets the system timezone
+    :return: System timezone
+    """
+
+    #Get local timezone from system
     try:
         return get_localzone_name()
     except Exception as e:
@@ -222,7 +302,11 @@ def get_system_tz() -> str:
 TIMEZONE = get_system_tz()
 
 def convert_str_to_time(time_str: str) -> time:
-    #Converts string input in the format HH:MM into timezone.time object
+    """
+    Converts string input in the format HH:MM into timezone.time object
+    :param time_str: String representation of the time
+    :return: time object representation of the time
+    """
     try:
         return datetime.strptime(time_str, "%H:%M").time()
     except ValueError as e:
@@ -230,7 +314,11 @@ def convert_str_to_time(time_str: str) -> time:
         sys.exit(1)
 
 def convert_str_to_date(date_str: str) -> date:
-    #Converts string input in the format dd-mm-YYYY to a datetime.date object
+    """
+    Converts string input in the format dd-mm-YYYY to a datetime.date object
+    :param date_str: string representation of the date (in dd-mm-YYYY format)
+    :return: date object representation of the date
+    """
     try:
         return datetime.strptime(date_str, "%d-%m-%Y").date()
     except ValueError as e:
@@ -238,9 +326,16 @@ def convert_str_to_date(date_str: str) -> date:
         sys.exit(1)
 
 def create_table()-> None:
+    """
+    Creates empty SQLite table for events to be stored in
+    :return: none
+    """
+
+    #Create new database called 'events.db' and connect
     conn = sqlite3.connect(f"events.db")
     print("Opened database successfully")
 
+    #Create a new table called events, containing columns required for events to be stored
     conn.execute('''
     CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +350,7 @@ def create_table()-> None:
     )
     ''')
 
+    #Close connection
     conn.commit()
     conn.close()
 
@@ -288,7 +384,12 @@ def authenticate():
 
 
 def get_events_on_day(creds, date_str: str):
-    #Returns a list of all events on a given day
+    """
+    Returns a list of all events on a given day
+    :param creds: Google API credentials
+    :param date_str: String representation of the event date
+    :return: List of all events on the requested day
+    """
     try:
         service = build("calendar", "v3", credentials=creds)
 
@@ -297,6 +398,7 @@ def get_events_on_day(creds, date_str: str):
         start_datetime = datetime.combine(day, time.min).isoformat() + 'Z'
         end_datetime = datetime.combine(day, time.max).isoformat() + 'Z'
 
+        #Send request to API to return list of events on chosen day
         events_result = service.events().list(
             calendarId='primary',
             timeMin=start_datetime,
@@ -305,16 +407,19 @@ def get_events_on_day(creds, date_str: str):
             orderBy='startTime'
         ).execute()
 
-
+        #Generate list from JSON return body
         events = events_result.get('items', [])
 
         return events
 
     except HttpError as error:
-        print(f"An error occurred: {error}")
-        quit()
+        print(f"An HTTP error occurred: {error}")
+        sys.exit(1)
 
+
+"""
 def user_create_event(date_str: str, start_time_str: str, duration: int, is_flexible: bool, summary: str) -> Event:
+    
     day = convert_str_to_date(date_str)
     start_time = convert_str_to_time(start_time_str)
     start_dt = datetime.combine(day, start_time, tzinfo=zoneinfo.ZoneInfo(TIMEZONE))
@@ -327,7 +432,7 @@ def user_create_event(date_str: str, start_time_str: str, duration: int, is_flex
         pass
 
     return event
-
+"""
 
 def print_events(events):
     #Prints list of events to the terminal (for debug purposes)
@@ -340,24 +445,35 @@ def print_events(events):
       print(start, event["summary"])
 
 def add_events_on_day_to_db(creds, db_name: str, date_str: str):
-    #Adds existing events from the Google calendar on a given day to the DB
+    """
+    Adds existing events from the Google calendar on a given day to the DB
+    :param creds: Google API credentials
+    :param db_name: Database file name
+    :param date_str: String representation of the event date
+    :return: None
+    """
+    #Get list of all events on day from Google calendar
     events = get_events_on_day(creds, date_str)
+
+
     for event in events:
+        #Convert start and end dates into datetime objects
         start_str = event["start"].get("dateTime", event["start"].get("date"))
         end_str = event["end"].get("dateTime", event["end"].get("date"))
 
         start_dt = datetime.fromisoformat(start_str)
         end_dt = datetime.fromisoformat(end_str)
 
+        #Create a FixedEvent object for each event and add it to the database
         FixedEvent(event["summary"], start_dt, end_dt).add_to_db(db_name)
 
 
 
 def main():
     creds = authenticate()
-    add_events_on_day_to_db(creds, "events.db", "27-06-2025")
+    add_events_on_day_to_db(creds, "events.db", "28-06-2025")
     eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("27-06-2025", "18:00", "23:00", 30, "Test API Flex")
+    new_event = eb.create_flexible_event("28-06-2025", "18:00", "23:00", 30, "Test API")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")
 

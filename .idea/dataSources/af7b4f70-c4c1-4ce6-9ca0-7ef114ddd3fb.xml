@@ -499,7 +499,7 @@
     <routine id="190" parent="1" name="fts5"/>
     <schema id="191" parent="1" name="main">
       <Current>1</Current>
-      <LastIntrospectionLocalTimestamp>2025-06-27.14:37:53</LastIntrospectionLocalTimestamp>
+      <LastIntrospectionLocalTimestamp>2025-07-24.18:15:23</LastIntrospectionLocalTimestamp>
     </schema>
     <argument id="192" parent="16">
       <ArgumentDirection>R</ArgumentDirection>
@@ -1638,7 +1638,7 @@
     <column id="566" parent="555" name="last_updated">
       <NotNull>1</NotNull>
       <Position>9</Position>
-      <StoredType>TEXT|0s</StoredType>
+      <StoredType>DATETIME|0s</StoredType>
     </column>
     <key id="567" parent="555">
       <ColNames>id</ColNames>

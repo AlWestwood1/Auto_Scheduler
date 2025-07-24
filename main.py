@@ -264,6 +264,31 @@ class FlexibleEventBuilder(EventBuilder):
     def __init__(self):
         super().__init__()
 
+    @staticmethod
+    def find_start_end_times(db_name: str, valid_start_dt: datetime, valid_end_dt: datetime, duration: int) -> Tuple[datetime, datetime]:
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        #TODO: work out way of finding the best start/end times in the case of there being multiple events to minimise clashes (e.g. put event where there is just 1 clash rather than 2)
+        cursor.execute('''
+                       SELECT event_start_dt, event_end_dt
+                       FROM events
+                       WHERE event_start_dt BETWEEN ? AND ?
+                       ORDER BY event_start_dt''', (valid_start_dt.isoformat(), valid_end_dt.isoformat()))
+
+        events = cursor.fetchall()
+
+        for i in range(0, len(events)+1):
+            prev_event_end = valid_start_dt if i == 0 else datetime.fromisoformat(events[i - 1][1])
+            next_event_start = valid_end_dt if i == len(events) else datetime.fromisoformat(events[i][0])
+            start_dt = prev_event_end
+            end_dt = prev_event_end + timedelta(minutes=duration)
+            if end_dt <= next_event_start and end_dt <= valid_end_dt:
+                return start_dt, end_dt
+
+
+
+        return valid_start_dt, valid_start_dt + timedelta(minutes=duration)
+
     def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
         """
         Creates a flexible event from the input parameters
@@ -278,10 +303,10 @@ class FlexibleEventBuilder(EventBuilder):
         #Generate valid timerange datetimes from the valid start and end dates/times
         valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
         #Initalise the event end datetime as the valid start datetime + duration
-        init_end_dt = valid_start_dt + timedelta(minutes=duration)
+        start_dt, end_dt = self.find_start_end_times("events.db", valid_start_dt, valid_end_dt, duration)
 
         #Create FlexibleEvent from args (event will start at valid_start_dt and last duration minutes)
-        return FlexibleEvent(summary, valid_start_dt, init_end_dt, valid_start_dt, valid_end_dt)
+        return FlexibleEvent(summary, start_dt, end_dt, valid_start_dt, valid_end_dt)
 
 
 
@@ -346,13 +371,20 @@ def create_table()-> None:
     valid_start_dt TEXT,
     valid_end_dt TEXT,
     timezone TEXT NOT NULL,
-    last_updated TEXT NOT NULL
+    last_updated DATETIME NOT NULL
     )
     ''')
 
     #Close connection
     conn.commit()
     conn.close()
+
+def get_next_midnight(dt: datetime) -> datetime:
+    dt_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt_midnight + timedelta(days=1)
+
+
+
 
 
 
@@ -471,12 +503,11 @@ def add_events_on_day_to_db(creds, db_name: str, date_str: str):
 
 def main():
     creds = authenticate()
-    add_events_on_day_to_db(creds, "events.db", "28-06-2025")
+    add_events_on_day_to_db(creds, "events.db", "24-07-2025")
     eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("28-06-2025", "18:00", "23:00", 30, "Test API")
+    new_event = eb.create_flexible_event("24-07-2025", "18:00", "23:00", 30, "Test API")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")
-
 
 
 

@@ -4,7 +4,7 @@ import zoneinfo
 from tzlocal import get_localzone_name
 import sqlite3
 import sys
-from typing import Tuple
+from typing import Tuple, List
 from abc import ABC
 
 from google.auth.transport.requests import Request
@@ -243,6 +243,28 @@ class FixedEventBuilder(EventBuilder):
     def __init__(self):
         super().__init__()
 
+    @staticmethod
+    def check_fixed_clashes(db_name: str, start_dt: datetime, end_dt: datetime):
+        # Connect to database
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+                       SELECT summary, event_start_dt, event_end_dt
+                       FROM events
+                       WHERE (is_flexible = 0)
+                          AND(event_start_dt BETWEEN ? AND ?)
+                          OR (? BETWEEN event_start_dt AND event_end_dt)
+                          OR (? BETWEEN event_start_dt AND event_end_dt)
+                       ORDER BY event_start_dt''',
+                       (start_dt.isoformat(), end_dt.isoformat(), start_dt.isoformat(), end_dt.isoformat()))
+
+        events = cursor.fetchall()
+        conn.close()
+
+        return events
+
+
     def create_fixed_event(self, date_str: str, start_time_str: str, end_time_str: str, summary: str) -> FixedEvent:
         """
         Creates a fixed event from the input parameters
@@ -256,6 +278,22 @@ class FixedEventBuilder(EventBuilder):
         #Generate datetime representation of start and end dates
         start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
 
+        clashes = self.check_fixed_clashes('events.db', start_dt, end_dt)
+        if len(clashes) > 0:
+            print(f"This event would clash with the following fixed events:")
+            for clash in clashes:
+                print(f"\t{clash[0]}")
+            valid = False
+            while not valid:
+                cont = input("Do you want to continue? [y/N] ")
+                if cont.lower() == 'n':
+                    sys.exit(0)
+                elif cont.lower() != 'y':
+                    print('Invalid input - please try again')
+                else:
+                    valid = True
+
+
         #Create and return FixedEvent
         return FixedEvent(summary, start_dt, end_dt)
 
@@ -263,31 +301,48 @@ class FixedEventBuilder(EventBuilder):
 class FlexibleEventBuilder(EventBuilder):
     def __init__(self):
         super().__init__()
+        self.can_create = False
+        self.start_dt = None
+        self.end_dt = None
 
-    @staticmethod
-    def find_start_end_times(db_name: str, valid_start_dt: datetime, valid_end_dt: datetime, duration: int) -> Tuple[datetime, datetime]:
+
+    def find_start_end_times(self, db_name: str, valid_start_dt: datetime, valid_end_dt: datetime, duration: int) -> None:
+        """
+        Finds the earliest valid start and end times (i.e. without any clashes) for the event.
+        :param db_name: Name of the database
+        :param valid_start_dt: earliest valid start time for event
+        :param valid_end_dt: latest valid end time for event
+        :param duration: duration of event
+        :return: None
+        """
+        #Connect to database
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
         #TODO: work out way of finding the best start/end times in the case of there being multiple events to minimise clashes (e.g. put event where there is just 1 clash rather than 2)
+        #Fetch list of all events in the valid window in chronological order
         cursor.execute('''
                        SELECT event_start_dt, event_end_dt
                        FROM events
-                       WHERE event_start_dt BETWEEN ? AND ?
-                       ORDER BY event_start_dt''', (valid_start_dt.isoformat(), valid_end_dt.isoformat()))
+                       WHERE (event_start_dt BETWEEN ? AND ?)
+                          OR (? BETWEEN event_start_dt AND event_end_dt)
+                           OR (? BETWEEN event_start_dt AND event_end_dt)
+                       ORDER BY event_start_dt''', (valid_start_dt.isoformat(), valid_end_dt.isoformat(), valid_start_dt.isoformat(), valid_end_dt.isoformat()))
 
         events = cursor.fetchall()
+        conn.close()
 
+        #Iterate through events
+        #If the interval between the end time of one event and the start of the next is larger than the duration, put the start/end times in this space
         for i in range(0, len(events)+1):
             prev_event_end = valid_start_dt if i == 0 else datetime.fromisoformat(events[i - 1][1])
             next_event_start = valid_end_dt if i == len(events) else datetime.fromisoformat(events[i][0])
-            start_dt = prev_event_end
-            end_dt = prev_event_end + timedelta(minutes=duration)
-            if end_dt <= next_event_start and end_dt <= valid_end_dt:
-                return start_dt, end_dt
+            candidate_start_dt = prev_event_end
+            candidate_end_dt = prev_event_end + timedelta(minutes=duration)
+            if candidate_end_dt <= next_event_start and candidate_end_dt <= valid_end_dt:
+                self.can_create = True
+                self.start_dt = candidate_start_dt
+                self.end_dt = candidate_end_dt
 
-
-
-        return valid_start_dt, valid_start_dt + timedelta(minutes=duration)
 
     def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
         """
@@ -303,10 +358,14 @@ class FlexibleEventBuilder(EventBuilder):
         #Generate valid timerange datetimes from the valid start and end dates/times
         valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
         #Initalise the event end datetime as the valid start datetime + duration
-        start_dt, end_dt = self.find_start_end_times("events.db", valid_start_dt, valid_end_dt, duration)
+        self.find_start_end_times("events.db", valid_start_dt, valid_end_dt, duration)
+
+        if not self.can_create:
+            print("No valid time slot can be found for this event.")
+            sys.exit(1)
 
         #Create FlexibleEvent from args (event will start at valid_start_dt and last duration minutes)
-        return FlexibleEvent(summary, start_dt, end_dt, valid_start_dt, valid_end_dt)
+        return FlexibleEvent(summary, self.start_dt, self.end_dt, valid_start_dt, valid_end_dt)
 
 
 
@@ -382,11 +441,6 @@ def create_table()-> None:
 def get_next_midnight(dt: datetime) -> datetime:
     dt_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return dt_midnight + timedelta(days=1)
-
-
-
-
-
 
 def authenticate():
     #Creates the json access and refresh tokens to authenticate user to the application
@@ -503,9 +557,12 @@ def add_events_on_day_to_db(creds, db_name: str, date_str: str):
 
 def main():
     creds = authenticate()
-    add_events_on_day_to_db(creds, "events.db", "24-07-2025")
-    eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("24-07-2025", "18:00", "23:00", 30, "Test API")
+    add_events_on_day_to_db(creds, "events.db", "03-08-2025")
+    eb = FixedEventBuilder()
+    new_event = eb.create_fixed_event("03-08-2025",
+                                         "15:00",
+                                         "21:00",
+                                         "Test Fixed event")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")
 

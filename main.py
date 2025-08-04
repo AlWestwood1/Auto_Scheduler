@@ -460,6 +460,9 @@ def create_table()-> None:
     conn.commit()
     conn.close()
 
+def get_cur_midnight(dt: datetime) -> datetime:
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
 def get_next_midnight(dt: datetime) -> datetime:
     dt_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return dt_midnight + timedelta(days=1)
@@ -491,9 +494,24 @@ def authenticate():
     return creds
 
 
-def optimise_flex_events(db_name: str, day) -> None:
-    pass
+def optimise_flex_events(db_name: str, dt: datetime) -> None:
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
 
+    cur_midnight = get_cur_midnight(dt)
+    next_midnight = get_next_midnight(dt)
+
+
+    cursor.execute('''
+        SELECT google_id, event_start_dt, event_end_dt FROM events
+        WHERE (event_start_dt BETWEEN ? AND ?)
+            AND (is_flexible = 1)
+        ORDER BY event_start_dt''',
+        (cur_midnight.isoformat(), next_midnight.isoformat()))
+
+    events = cursor.fetchall()
+    print(events)
+    conn.close()
 
 def get_events_on_day(creds, date_str: str):
     """
@@ -585,13 +603,16 @@ def add_events_on_day_to_db(creds, db_name: str, date_str: str):
 def main():
     creds = authenticate()
     add_events_on_day_to_db(creds, "events.db", "04-08-2025")
-    eb = FixedEventBuilder()
-    new_event = eb.create_fixed_event("04-08-2025",
+    eb = FlexibleEventBuilder()
+    new_event = eb.create_flexible_event("04-08-2025",
                                          "15:00",
-                                         "16:00",
-                                         "Test Fixed event")
+                                         "19:00",
+                                         30,
+                                         "Test Flexible event")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")
+
+    optimise_flex_events('events.db', datetime(2025, 8, 4))
 
 
 

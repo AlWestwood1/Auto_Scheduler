@@ -19,7 +19,8 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 class Event(ABC):
     def __init__(self, summary: str,
                  start_dt: datetime,
-                 end_dt: datetime,):
+                 end_dt: datetime,
+                 google_id: str = None):
 
         self.start_dt: datetime = start_dt
         self.end_dt: datetime = end_dt
@@ -28,6 +29,7 @@ class Event(ABC):
         self.summary: str = summary
         self.valid_start_dt: datetime = start_dt
         self.valid_end_dt: datetime = end_dt
+        self.google_id: str = google_id
 
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
@@ -68,6 +70,7 @@ class Event(ABC):
             service = build("calendar", "v3", credentials=creds)
             event = service.events().insert(calendarId='primary', body=event).execute()
             print(f"Event created: {event.get('htmlLink')}")
+            self.google_id = event.get('id')
 
         except HttpError as error:
             print(f"An error occurred: {error}")
@@ -114,7 +117,7 @@ class Event(ABC):
 
         return False
 
-    def add_to_db(self, db_name: str) -> bool:
+    def add_to_db(self, db_name: str) -> int:
         """
         Adds an event to the database
         :param db_name: database file name
@@ -123,7 +126,7 @@ class Event(ABC):
 
         #If the event is a duplicate, return False
         if self.is_duplicate(db_name):
-            return False
+            return -1
 
         #Connect to the DB
         conn = sqlite3.connect(db_name)
@@ -132,8 +135,9 @@ class Event(ABC):
         #Add a new row with event params into the DB
         cursor.execute('''
                        INSERT INTO events (summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt,
-                                           valid_end_dt, timezone, last_updated)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                           valid_end_dt, timezone, google_id, last_updated)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       RETURNING id
                        ''', (self.summary,
                              int(self.is_flexible),
                              self.start_dt.isoformat(),
@@ -141,15 +145,17 @@ class Event(ABC):
                              self.valid_start_dt.isoformat(),
                              self.valid_end_dt.isoformat(),
                              TIMEZONE,
+                             self.google_id,
                              datetime.now().isoformat()))
 
+        new_id = cursor.fetchone()[0]
         #Close connection to DB
         conn.commit()
         conn.close()
 
         #Print success message and return True
         print("Event added to database successfully")
-        return True
+        return new_id
 
     def submit_event(self, creds, db_name) -> None:
         """
@@ -159,20 +165,34 @@ class Event(ABC):
         :return: None
         """
         #Add event to database, return whether it was added successfully
-        valid = self.add_to_db(db_name)
+        db_id = self.add_to_db(db_name)
 
         #If event was added to the DB successfully, add to the Google Calendar
-        if valid:
+        if db_id != -1:
             self.add_to_calendar(creds)
+
+            conn = sqlite3.connect(db_name)
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                UPDATE events
+                SET google_id = ?
+                WHERE id = ?
+                ''', (self.google_id, db_id))
+
+            conn.commit()
+            conn.close()
+
             print(f"Submitted event {self.summary}")
 
 
 class FixedEvent(Event):
     def __init__(self, summary: str,
                  start_dt: datetime,
-                 end_dt: datetime):
+                 end_dt: datetime,
+                 google_id: str = None):
 
-        super().__init__(summary, start_dt, end_dt)
+        super().__init__(summary, start_dt, end_dt, google_id)
         self.is_flexible: bool = False
         self.valid_start_dt: datetime = start_dt
         self.valid_end_dt: datetime = end_dt
@@ -191,9 +211,10 @@ class FlexibleEvent(Event):
                  start_dt: datetime,
                  end_dt: datetime,
                  valid_start_dt: datetime,
-                 valid_end_dt: datetime):
+                 valid_end_dt: datetime,
+                 google_id: str = None):
 
-        super().__init__(summary, start_dt, end_dt)
+        super().__init__(summary, start_dt, end_dt, google_id)
         self.is_flexible: bool = True
         self.valid_start_dt: datetime = valid_start_dt
         self.valid_end_dt: datetime = valid_end_dt
@@ -430,6 +451,7 @@ def create_table()-> None:
     valid_start_dt TEXT,
     valid_end_dt TEXT,
     timezone TEXT NOT NULL,
+    google_id TEXT,
     last_updated DATETIME NOT NULL
     )
     ''')
@@ -467,6 +489,10 @@ def authenticate():
             token.write(creds.to_json())
 
     return creds
+
+
+def optimise_flex_events(db_name: str, day) -> None:
+    pass
 
 
 def get_events_on_day(creds, date_str: str):
@@ -546,22 +572,23 @@ def add_events_on_day_to_db(creds, db_name: str, date_str: str):
         #Convert start and end dates into datetime objects
         start_str = event["start"].get("dateTime", event["start"].get("date"))
         end_str = event["end"].get("dateTime", event["end"].get("date"))
+        event_id = event["id"]
 
         start_dt = datetime.fromisoformat(start_str)
         end_dt = datetime.fromisoformat(end_str)
 
         #Create a FixedEvent object for each event and add it to the database
-        FixedEvent(event["summary"], start_dt, end_dt).add_to_db(db_name)
+        FixedEvent(event["summary"], start_dt, end_dt, event_id).add_to_db(db_name)
 
 
 
 def main():
     creds = authenticate()
-    add_events_on_day_to_db(creds, "events.db", "03-08-2025")
+    add_events_on_day_to_db(creds, "events.db", "04-08-2025")
     eb = FixedEventBuilder()
-    new_event = eb.create_fixed_event("03-08-2025",
+    new_event = eb.create_fixed_event("04-08-2025",
                                          "15:00",
-                                         "21:00",
+                                         "16:00",
                                          "Test Fixed event")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")

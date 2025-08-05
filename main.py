@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from typing import Tuple, List
 from abc import ABC
+import copy
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -25,7 +26,7 @@ class Event(ABC):
         self.start_dt: datetime = start_dt
         self.end_dt: datetime = end_dt
         self.is_flexible: bool = False
-        self.duration: float = (end_dt - start_dt).total_seconds()
+        self.duration: float = (end_dt - start_dt).total_seconds() / 60
         self.summary: str = summary
         self.valid_start_dt: datetime = start_dt
         self.valid_end_dt: datetime = end_dt
@@ -134,14 +135,15 @@ class Event(ABC):
 
         #Add a new row with event params into the DB
         cursor.execute('''
-                       INSERT INTO events (summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt,
+                       INSERT INTO events (summary, is_flexible, event_start_dt, event_end_dt, duration, valid_start_dt,
                                            valid_end_dt, timezone, google_id, last_updated)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?)
                        RETURNING id
                        ''', (self.summary,
                              int(self.is_flexible),
                              self.start_dt.isoformat(),
                              self.end_dt.isoformat(),
+                             self.duration,
                              self.valid_start_dt.isoformat(),
                              self.valid_end_dt.isoformat(),
                              TIMEZONE,
@@ -322,47 +324,6 @@ class FixedEventBuilder(EventBuilder):
 class FlexibleEventBuilder(EventBuilder):
     def __init__(self):
         super().__init__()
-        self.can_create = False
-        self.start_dt = None
-        self.end_dt = None
-
-
-    def find_start_end_times(self, db_name: str, valid_start_dt: datetime, valid_end_dt: datetime, duration: int) -> None:
-        """
-        Finds the earliest valid start and end times (i.e. without any clashes) for the event.
-        :param db_name: Name of the database
-        :param valid_start_dt: earliest valid start time for event
-        :param valid_end_dt: latest valid end time for event
-        :param duration: duration of event
-        :return: None
-        """
-        #Connect to database
-        conn = sqlite3.connect(db_name)
-        cursor = conn.cursor()
-        #TODO: work out way of finding the best start/end times in the case of there being multiple events to minimise clashes (e.g. put event where there is just 1 clash rather than 2)
-        #Fetch list of all events in the valid window in chronological order
-        cursor.execute('''
-                       SELECT event_start_dt, event_end_dt
-                       FROM events
-                       WHERE (event_start_dt BETWEEN ? AND ?)
-                          OR (? BETWEEN event_start_dt AND event_end_dt)
-                           OR (? BETWEEN event_start_dt AND event_end_dt)
-                       ORDER BY event_start_dt''', (valid_start_dt.isoformat(), valid_end_dt.isoformat(), valid_start_dt.isoformat(), valid_end_dt.isoformat()))
-
-        events = cursor.fetchall()
-        conn.close()
-
-        #Iterate through events
-        #If the interval between the end time of one event and the start of the next is larger than the duration, put the start/end times in this space
-        for i in range(0, len(events)+1):
-            prev_event_end = valid_start_dt if i == 0 else datetime.fromisoformat(events[i - 1][1])
-            next_event_start = valid_end_dt if i == len(events) else datetime.fromisoformat(events[i][0])
-            candidate_start_dt = prev_event_end
-            candidate_end_dt = prev_event_end + timedelta(minutes=duration)
-            if candidate_end_dt <= next_event_start and candidate_end_dt <= valid_end_dt:
-                self.can_create = True
-                self.start_dt = candidate_start_dt
-                self.end_dt = candidate_end_dt
 
 
     def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
@@ -379,14 +340,67 @@ class FlexibleEventBuilder(EventBuilder):
         #Generate valid timerange datetimes from the valid start and end dates/times
         valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
         #Initalise the event end datetime as the valid start datetime + duration
-        self.find_start_end_times("events.db", valid_start_dt, valid_end_dt, duration)
 
-        if not self.can_create:
+        conn = sqlite3.connect('events.db')
+        cursor = conn.cursor()
+        # TODO: work out way of finding the best start/end times in the case of there being multiple events to minimise clashes (e.g. put event where there is just 1 clash rather than 2)
+        # Fetch list of all events in the valid window in chronological order
+        cursor.execute('''
+                       SELECT event_start_dt, event_end_dt
+                       FROM events
+                       WHERE (event_start_dt BETWEEN ? AND ?)
+                          OR (? BETWEEN event_start_dt AND event_end_dt)
+                          OR (? BETWEEN event_start_dt AND event_end_dt)
+                       ORDER BY event_start_dt''',
+                       (valid_start_dt.isoformat(), valid_end_dt.isoformat(), valid_start_dt.isoformat(),
+                        valid_end_dt.isoformat()))
+
+        events = cursor.fetchall()
+        conn.close()
+
+
+
+        slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
+        start_dt, end_dt = slot_finder.find_valid_slot(events)
+
+        if not slot_finder.no_clashes:
             print("No valid time slot can be found for this event.")
             sys.exit(1)
 
         #Create FlexibleEvent from args (event will start at valid_start_dt and last duration minutes)
-        return FlexibleEvent(summary, self.start_dt, self.end_dt, valid_start_dt, valid_end_dt)
+        return FlexibleEvent(summary, start_dt, end_dt, valid_start_dt, valid_end_dt)
+
+
+class FlexSlotFinder:
+    def __init__(self, valid_start_dt: datetime, valid_end_dt: datetime, duration: int):
+        self.valid_start_dt = valid_start_dt
+        self.valid_end_dt = valid_end_dt
+        self.duration = duration
+        self.no_clashes = False
+        self.start_dt = None
+        self.end_dt = None
+
+    def find_valid_slot(self, events: List[Tuple[str, str]]) -> Tuple[datetime, datetime]:
+
+        # Iterate through events
+        # If the interval between the end time of one event and the start of the next is larger than the duration, put the start/end times in this space
+        for i in range(0, len(events) + 1):
+            prev_event_end = self.valid_start_dt if i == 0 else datetime.fromisoformat(events[i - 1][1])
+            next_event_start = self.valid_end_dt if i == len(events) else datetime.fromisoformat(events[i][0])
+            candidate_start_dt = prev_event_end
+            candidate_end_dt = prev_event_end + timedelta(minutes=self.duration)
+            if candidate_end_dt <= next_event_start and candidate_end_dt <= self.valid_end_dt:
+                self.no_clashes = True
+                self.start_dt = candidate_start_dt
+                self.end_dt = candidate_end_dt
+
+                return self.start_dt, self.end_dt
+
+        return self.valid_start_dt, self.valid_start_dt + timedelta(minutes=self.duration)
+
+
+
+
 
 
 
@@ -448,6 +462,7 @@ def create_table()-> None:
     is_flexible INTEGER NOT NULL,
     event_start_dt TEXT NOT NULL,
     event_end_dt TEXT NOT NULL,
+    duration INTEGER NOT NULL,
     valid_start_dt TEXT,
     valid_end_dt TEXT,
     timezone TEXT NOT NULL,
@@ -493,6 +508,29 @@ def authenticate():
 
     return creds
 
+def move_events(flex_events, res_events):
+    invalid_events = []
+    valid_events = []
+
+    for event in flex_events:
+        slot_finder = FlexSlotFinder(datetime.fromisoformat(event[1]), datetime.fromisoformat(event[2]), event[3])
+        new_start_dt, new_end_dt = slot_finder.find_valid_slot(res_events)
+        if slot_finder.no_clashes:
+            """
+            cursor.execute('''
+                UPDATE events
+                SET event_start_dt = ?,
+                    event_end_dt = ?
+                WHERE google_id = ?
+            ''', (new_start_dt.isoformat(), new_end_dt.isoformat(), event[0]))
+            """
+            valid_events.append(event)
+            res_events.append((new_start_dt.isoformat(), new_end_dt.isoformat()))
+            res_events.sort(key=lambda x: x[0])
+        else:
+            invalid_events.append(event)
+
+    return valid_events, invalid_events
 
 def optimise_flex_events(db_name: str, dt: datetime) -> None:
     conn = sqlite3.connect(db_name)
@@ -503,15 +541,50 @@ def optimise_flex_events(db_name: str, dt: datetime) -> None:
 
 
     cursor.execute('''
-        SELECT google_id, event_start_dt, event_end_dt FROM events
+        SELECT event_start_dt, event_end_dt FROM events
         WHERE (event_start_dt BETWEEN ? AND ?)
-            AND (is_flexible = 1)
+            AND (is_flexible = 0)
         ORDER BY event_start_dt''',
         (cur_midnight.isoformat(), next_midnight.isoformat()))
 
-    events = cursor.fetchall()
-    print(events)
+    fixed_events_st = cursor.fetchall()
+    fixed_events_et = copy.deepcopy(fixed_events_st)
+
+    cursor.execute('''
+       SELECT google_id, valid_start_dt, valid_end_dt, duration
+       FROM events
+       WHERE (event_start_dt BETWEEN ? AND ?)
+         AND (is_flexible = 1)
+       ORDER BY valid_start_dt, valid_end_dt''',
+       (cur_midnight.isoformat(), next_midnight.isoformat()))
+
+    flex_events_st = cursor.fetchall()
+
+    valid_events_st, invalid_events_st = move_events(flex_events_st, fixed_events_st)
+
+    cursor.execute('''
+                   SELECT google_id, valid_start_dt, valid_end_dt, duration
+                   FROM events
+                   WHERE (event_start_dt BETWEEN ? AND ?)
+                     AND (is_flexible = 1)
+                   ORDER BY valid_end_dt, valid_start_dt''',
+                   (cur_midnight.isoformat(), next_midnight.isoformat()))
+
+    flex_events = cursor.fetchall()
+
+    valid_events_et, invalid_events_et = move_events(flex_events, fixed_events_et)
+
+    print(valid_events_st)
+    print(invalid_events_st)
+    print(valid_events_et)
+    print(invalid_events_et)
+
+
+    #conn.commit()
     conn.close()
+
+
+
 
 def get_events_on_day(creds, date_str: str):
     """
@@ -602,17 +675,18 @@ def add_events_on_day_to_db(creds, db_name: str, date_str: str):
 
 def main():
     creds = authenticate()
-    add_events_on_day_to_db(creds, "events.db", "04-08-2025")
+    """
+    add_events_on_day_to_db(creds, "events.db", "05-08-2025")
     eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("04-08-2025",
-                                         "15:00",
+    new_event = eb.create_flexible_event("05-08-2025",
                                          "19:00",
+                                         "21:00",
                                          30,
-                                         "Test Flexible event")
+                                         "Test Flexible event 4")
     #print(new_event)
     new_event.submit_event(creds, db_name="events.db")
-
-    optimise_flex_events('events.db', datetime(2025, 8, 4))
+    """
+    optimise_flex_events('events.db', datetime(2025, 8, 5))
 
 
 

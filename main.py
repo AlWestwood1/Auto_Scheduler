@@ -124,9 +124,10 @@ class EventBuilder(ABC):
         :param end_time_str: String representation of the end time
         :return: Datetime representation of the start and end datetimes
         """
-        day = convert_str_to_date(date_str)
-        start_time = convert_str_to_time(start_time_str)
-        end_time = convert_str_to_time(end_time_str)
+        dtc = DateTimeConverter()
+        day = dtc.convert_str_to_date(date_str)
+        start_time = dtc.convert_str_to_time(start_time_str)
+        end_time = dtc.convert_str_to_time(end_time_str)
         start_dt = datetime.combine(day, start_time, tzinfo=zoneinfo.ZoneInfo(Timezone().timezone))
         end_dt = datetime.combine(day, end_time, tzinfo=zoneinfo.ZoneInfo(Timezone().timezone))
 

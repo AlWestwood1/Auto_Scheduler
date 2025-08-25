@@ -18,28 +18,38 @@ from googleapiclient.errors import HttpError
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+
 class Singleton(type):
     _instances = {}
+
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
+
 
 class EventType(Enum):
     FIXED = 0
     FLEXIBLE = 1
     ALL = 2
 
+class EventStatus(Enum):
+    UNCHANGED = 0
+    NEW = 1
+    MODIFIED = 2
+    DELETED = 3
+
+
 class OrderBy(Enum):
     START = "valid_start_dt, valid_end_dt"
     END = "valid_end_dt, valid_start_dt"
+
 
 class Event(ABC):
     def __init__(self, summary: str,
                  start_dt: datetime,
                  end_dt: datetime,
                  google_id: str = None):
-
         self.start_dt: datetime = start_dt
         self.end_dt: datetime = end_dt
         self.is_flexible: bool = False
@@ -48,7 +58,6 @@ class Event(ABC):
         self.valid_start_dt: datetime = start_dt
         self.valid_end_dt: datetime = end_dt
         self.google_id: str = google_id
-
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
         """
@@ -63,7 +72,6 @@ class FixedEvent(Event):
                  start_dt: datetime,
                  end_dt: datetime,
                  google_id: str = None):
-
         super().__init__(summary, start_dt, end_dt, google_id)
         self.is_flexible: bool = False
         self.valid_start_dt: datetime = start_dt
@@ -78,6 +86,7 @@ class FixedEvent(Event):
                 f"end_dt: {self.end_dt}\n"
                 f"duration: {self.duration}")
 
+
 class FlexibleEvent(Event):
     def __init__(self, summary: str,
                  start_dt: datetime,
@@ -85,7 +94,6 @@ class FlexibleEvent(Event):
                  valid_start_dt: datetime,
                  valid_end_dt: datetime,
                  google_id: str = None):
-
         super().__init__(summary, start_dt, end_dt, google_id)
         self.is_flexible: bool = True
         self.valid_start_dt: datetime = valid_start_dt
@@ -132,6 +140,7 @@ class EventBuilder(ABC):
         end_dt = datetime.combine(day, end_time, tzinfo=zoneinfo.ZoneInfo(Timezone().timezone))
 
         return start_dt, end_dt
+
 
 class FixedEventBuilder(EventBuilder):
     def __init__(self):
@@ -344,10 +353,10 @@ class Database(metaclass=Singleton):
         conn.commit()
         conn.close()
 
-    def exists(self, event: Event) -> bool:
+    def event_status(self, gc_event: Event) -> EventStatus:
         """
         Checks whether an event already exists in the database
-        :param event: Event to check duplicates for
+        :param gc_event: Event to check duplicates for
         :return: True if event already exists, False otherwise
         """
 
@@ -357,24 +366,26 @@ class Database(metaclass=Singleton):
 
         # Check if event with same name, start time and end time exists in the DB
         cursor.execute('''
-                       SELECT 1
+                       SELECT summary, event_start_dt, event_end_dt
                        FROM events
-                       WHERE summary = ?
-                         AND event_start_dt = ?
-                         AND event_end_dt = ?
+                       WHERE google_id = ?
                        LIMIT 1
-                       ''', (event.summary, event.start_dt.isoformat(), event.end_dt.isoformat()))
+                       ''', (gc_event.google_id,))
 
-        #If it exists, update the 'last modified' column of the entry in the DB and close connection (return True)
-        if cursor.fetchone():
-            conn.close()
-            print(f"Event with name '{event.summary}' already exists in database")
-            self.__update_timestamp(event)
-            return True
+        event_status = EventStatus.NEW
+        db_event = cursor.fetchone()
+        conn.close()
+
+
+        if db_event:
+            if db_event[0] != gc_event.summary or db_event[1] != gc_event.start_dt.isoformat() or db_event[2] != gc_event.end_dt.isoformat():
+                event_status = EventStatus.MODIFIED
+            else:
+                event_status = EventStatus.UNCHANGED
+            self.__update_timestamp(gc_event)
 
         #If it doesn't exist, close connection and return False
-        conn.close()
-        return False
+        return event_status
 
     def add_event(self, event: Event) -> int:
         """
@@ -384,7 +395,7 @@ class Database(metaclass=Singleton):
         """
 
         # If the event is a duplicate, return False
-        if self.exists(event):
+        if self.event_status(event) != EventStatus.NEW:
             return -1
 
         # Connect to the DB
@@ -416,6 +427,23 @@ class Database(metaclass=Singleton):
         # Print success message and return True
         print("Event added to database successfully")
         return new_id
+
+
+    def del_event(self, event: Event):
+        if self.event_status(event) == EventStatus.NEW:
+            print(f"Event {event.summary} does not exist in the database")
+            return
+
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute('''
+        DELETE FROM events
+            WHERE google_id = ?
+        ''', event.google_id)
+
+        conn.commit()
+        conn.close()
+        print(f"Event {event.summary} deleted from database successfully")
 
     def get_events(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
         conn = sqlite3.connect(self.db_name)
@@ -450,8 +478,11 @@ class Database(metaclass=Singleton):
         conn.close()
         return events
 
-    def update_event(self, event: Event):
-        #TODO add error handling for events that don't exist
+    def edit_event(self, event: Event):
+
+        if self.event_status(event) != EventStatus.MODIFIED:
+            print(f"Event {event.summary} has not been modified")
+
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
@@ -599,11 +630,10 @@ class GoogleCalendar(metaclass=Singleton):
 
         except HttpError as error:
             print(f"An HTTP error occurred: {error}")
-            print(error.content)
             sys.exit(1)
 
 
-    def update_event(self, event: Event):
+    def edit_event(self, event: Event):
         service = build("calendar", "v3", credentials=self.creds)
 
         service.events().patch(
@@ -639,7 +669,10 @@ class EventManager:
         events = GoogleCalendar().get_events(start_dt, end_dt)
 
         for event in events:
-            Database().add_event(event)
+            if Database().event_status(event) == EventStatus.NEW:
+                Database().add_event(event)
+            elif Database().event_status(event) == EventStatus.MODIFIED:
+                Database().edit_event(event)
 
     @staticmethod
     def submit_event(event) -> None:
@@ -728,8 +761,8 @@ class FlexEventOptimiser:
     def update_moved_events(events):
 
         for event in events:
-            Database().update_event(event)
-            GoogleCalendar().update_event(event)
+            Database().edit_event(event)
+            GoogleCalendar().edit_event(event)
 
 
     def optimise_flex_events(self, dt: datetime) -> None:
@@ -777,16 +810,21 @@ def main():
 
     em = EventManager()
     em.sync_gc_to_db(start_dt, end_dt)
+
+
     """
     eb = FlexibleEventBuilder()
     new_event = eb.create_flexible_event("05-08-2025",
-                                         "19:00",
+                                         "18:00",
                                          "21:00",
                                          30,
                                          "Test Flexible event 4")
     #print(new_event)
-    new_event.submit_event(creds, db_name="events.db")
+
+    em.submit_event(new_event)
     """
+    #new_event.submit_event(creds, db_name="events.db")
+
     FlexEventOptimiser().optimise_flex_events(dt)
 
 
@@ -794,5 +832,3 @@ def main():
 if __name__ == "__main__":
     main()
     #create_table()
-
-

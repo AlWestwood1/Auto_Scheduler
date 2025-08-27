@@ -29,23 +29,34 @@ class Singleton(type):
 
 
 class EventType(Enum):
+    """
+    Enum class that defines the possible types of events
+    """
     FIXED = 0
     FLEXIBLE = 1
     ALL = 2
 
 class EventStatus(Enum):
+    """
+    Enum class that defines the possible statuses of events when updating the DB with latest info from the GC
+    """
     UNCHANGED = 0
     NEW = 1
     MODIFIED = 2
-    DELETED = 3
 
 
 class OrderBy(Enum):
+    """
+    Enum class that defines the two ways of ordering events when fetching from DB
+    """
     START = "valid_start_dt, valid_end_dt"
     END = "valid_end_dt, valid_start_dt"
 
 
 class Event(ABC):
+    """
+    Class that holds information about a calendar event
+    """
     def __init__(self, summary: str,
                  start_dt: datetime,
                  end_dt: datetime,
@@ -68,6 +79,10 @@ class Event(ABC):
 
 
 class FixedEvent(Event):
+    """
+    Fixed events can only exist at a fixed time, and will not be rearranged if a conflicting event is added
+    E.g. a fixed event at 6-7pm will also have a valid window of 6-7pm. The event cannot be moved from this time
+    """
     def __init__(self, summary: str,
                  start_dt: datetime,
                  end_dt: datetime,
@@ -88,6 +103,12 @@ class FixedEvent(Event):
 
 
 class FlexibleEvent(Event):
+    """
+    Flexible events have a valid 'window' of time that the event can be moved within. If a conflicting event is added
+    within the current event window, it can be moved anywhere within the valid event window to remove the conflict
+    E.g. An event with a duration of 30 mins and a valid window of 6-7pm can exist at any time between 6-7pm but will
+         always be 30 mins long
+    """
     def __init__(self, summary: str,
                  start_dt: datetime,
                  end_dt: datetime,
@@ -120,8 +141,9 @@ class FlexibleEvent(Event):
 
 
 class EventBuilder(ABC):
-    def __init__(self):
-        pass
+    """
+    Builder class for events
+    """
 
     @staticmethod
     def _generate_dts(date_str: str, start_time_str: str, end_time_str: str) -> Tuple[datetime, datetime]:
@@ -143,30 +165,9 @@ class EventBuilder(ABC):
 
 
 class FixedEventBuilder(EventBuilder):
-    def __init__(self):
-        super().__init__()
-
-    @staticmethod
-    def check_fixed_clashes(db_name: str, start_dt: datetime, end_dt: datetime):
-        # Connect to database
-        conn = sqlite3.connect(db_name)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-                       SELECT summary, event_start_dt, event_end_dt
-                       FROM events
-                       WHERE (is_flexible = 0)
-                          AND(event_start_dt BETWEEN ? AND ?)
-                          OR (? BETWEEN event_start_dt AND event_end_dt)
-                          OR (? BETWEEN event_start_dt AND event_end_dt)
-                       ORDER BY event_start_dt''',
-                       (start_dt.isoformat(), end_dt.isoformat(), start_dt.isoformat(), end_dt.isoformat()))
-
-        events = cursor.fetchall()
-        conn.close()
-
-        return events
-
+    """
+    Builder class for fixed events
+    """
 
     def create_fixed_event(self, date_str: str, start_time_str: str, end_time_str: str, summary: str) -> FixedEvent:
         """
@@ -181,11 +182,11 @@ class FixedEventBuilder(EventBuilder):
         #Generate datetime representation of start and end dates
         start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
 
-        clashes = self.check_fixed_clashes('events.db', start_dt, end_dt)
+        clashes = Database().get_events(start_dt, end_dt, EventType.FIXED)
         if len(clashes) > 0:
             print(f"This event would clash with the following fixed events:")
             for clash in clashes:
-                print(f"\t{clash[0]}")
+                print(f"\t{clash.summary}")
             valid = False
             while not valid:
                 cont = input("Do you want to continue? [y/N] ")
@@ -202,9 +203,9 @@ class FixedEventBuilder(EventBuilder):
 
 
 class FlexibleEventBuilder(EventBuilder):
-    def __init__(self):
-        super().__init__()
-
+    """
+    Builder class for flexible events
+    """
 
     def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
         """
@@ -219,30 +220,12 @@ class FlexibleEventBuilder(EventBuilder):
 
         #Generate valid timerange datetimes from the valid start and end dates/times
         valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
-        #Initalise the event end datetime as the valid start datetime + duration
 
-        conn = sqlite3.connect('events.db')
-        cursor = conn.cursor()
-        # TODO: work out way of finding the best start/end times in the case of there being multiple events to minimise clashes (e.g. put event where there is just 1 clash rather than 2)
         # Fetch list of all events in the valid window in chronological order
-        cursor.execute('''
-                       SELECT summary, event_start_dt, event_end_dt
-                       FROM events
-                       WHERE (event_start_dt BETWEEN ? AND ?)
-                          OR (? BETWEEN event_start_dt AND event_end_dt)
-                          OR (? BETWEEN event_start_dt AND event_end_dt)
-                       ORDER BY event_start_dt''',
-                       (valid_start_dt.isoformat(), valid_end_dt.isoformat(), valid_start_dt.isoformat(),
-                        valid_end_dt.isoformat()))
-
-        events = []
-        for event in cursor.fetchall():
-            events.append(FixedEvent(event[0], datetime.fromisoformat(event[1]), datetime.fromisoformat(event[2])))
-
-        conn.close()
+        clashes = Database().get_events(valid_start_dt, valid_end_dt, EventType.ALL)
 
         slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
-        start_dt, end_dt = slot_finder.find_valid_slot(events)
+        start_dt, end_dt = slot_finder.find_valid_slot(clashes)
 
         if not slot_finder.no_clashes:
             print("No valid time slot can be found for this event.")
@@ -253,6 +236,9 @@ class FlexibleEventBuilder(EventBuilder):
 
 
 class FlexSlotFinder:
+    """
+    Finds valid spaces for flexible events given the start and end valid ranges
+    """
     def __init__(self, valid_start_dt: datetime, valid_end_dt: datetime, duration: int):
         self.valid_start_dt = valid_start_dt
         self.valid_end_dt = valid_end_dt
@@ -261,7 +247,7 @@ class FlexSlotFinder:
         self.start_dt = None
         self.end_dt = None
 
-    def find_valid_slot(self, events: List[FixedEvent]) -> Tuple[datetime, datetime]:
+    def find_valid_slot(self, events: List[Event]) -> Tuple[datetime, datetime]:
 
         # Iterate through events
         # If the interval between the end time of one event and the start of the next is larger than the duration, put the start/end times in this space
@@ -281,13 +267,15 @@ class FlexSlotFinder:
 
 
 class Timezone(metaclass=Singleton):
+    """
+    Stores local timezone information
+    """
     def __init__(self):
         self.timezone = self.local_tz()
 
     @staticmethod
     def local_tz() -> str:
         """
-        Gets the system timezone
         :return: System timezone
         """
 
@@ -300,7 +288,6 @@ class Timezone(metaclass=Singleton):
 
 
 class Database(metaclass=Singleton):
-    #TODO: Delete event
 
     def __init__(self) -> None:
         self.db_name = "events.db"
@@ -340,31 +327,33 @@ class Database(metaclass=Singleton):
 
 
     def __update_timestamp(self, event: Event) -> None:
+        """
+        Updates event last modified timestamp in db
+        :param event:
+        :return:
+        """
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         cursor.execute('''
                        UPDATE events
                        SET last_updated = ?
-                       WHERE summary = ?
-                         AND event_start_dt = ?
-                         AND event_end_dt = ?
-                       ''', (datetime.now().isoformat(), event.summary, event.start_dt.isoformat(),
-                             event.end_dt.isoformat()))
+                       WHERE google_id = ?
+                       ''', (datetime.now().isoformat(), event.google_id))
         conn.commit()
         conn.close()
 
     def event_status(self, gc_event: Event) -> EventStatus:
         """
-        Checks whether an event already exists in the database
-        :param gc_event: Event to check duplicates for
-        :return: True if event already exists, False otherwise
+        Checks whether an event has been added or modified (compared to the db)
+        :param gc_event: Event to check status of
+        :return: EventStatus object with status of event
         """
 
         #Connect to db
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
-        # Check if event with same name, start time and end time exists in the DB
+        # Check if event with same google_id exists
         cursor.execute('''
                        SELECT summary, event_start_dt, event_end_dt
                        FROM events
@@ -376,7 +365,7 @@ class Database(metaclass=Singleton):
         db_event = cursor.fetchone()
         conn.close()
 
-
+        #Check if any metadata for the event has changed
         if db_event:
             if db_event[0] != gc_event.summary or db_event[1] != gc_event.start_dt.isoformat() or db_event[2] != gc_event.end_dt.isoformat():
                 event_status = EventStatus.MODIFIED
@@ -384,7 +373,6 @@ class Database(metaclass=Singleton):
                 event_status = EventStatus.UNCHANGED
             self.__update_timestamp(gc_event)
 
-        #If it doesn't exist, close connection and return False
         return event_status
 
     def add_event(self, event: Event) -> int:
@@ -429,11 +417,19 @@ class Database(metaclass=Singleton):
         return new_id
 
 
-    def del_event(self, event: Event):
+    def del_event(self, event: Event) -> None:
+        """
+        Deletes an event from the database
+        :param event: Event to be deleted
+        :return: None
+        """
+
+        #Check that event exists in the DB
         if self.event_status(event) == EventStatus.NEW:
             print(f"Event {event.summary} does not exist in the database")
             return
 
+        #Delete event
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         cursor.execute('''
@@ -446,26 +442,40 @@ class Database(metaclass=Singleton):
         print(f"Event {event.summary} deleted from database successfully")
 
     def get_events(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
+        """
+        Returns all events within the given time range
+        :param from_dt: Start time
+        :param to_dt: End time
+        :param event_type: Types of events to return (Fixed, Flexible or all)
+        :param order_by: Order by (start times or end times)
+        :return: List of events in range
+        """
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
+        #If event type is all, the is_flexible filter is not needed
         if event_type == EventType.ALL:
             cursor.execute(f"""
                            SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
                            FROM events
                            WHERE (event_start_dt BETWEEN ? AND ?)
+                            OR (? BETWEEN event_start_dt AND event_end_dt)
+                            OR (? BETWEEN event_start_dt AND event_end_dt)
                            ORDER BY {order_by.value}""",
-                           (from_dt.isoformat(), to_dt.isoformat(), event_type.value))
+                           (from_dt.isoformat(), to_dt.isoformat(), from_dt.isoformat(), to_dt.isoformat()))
 
         else:
             cursor.execute(f"""
                            SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
                            FROM events
-                           WHERE (event_start_dt BETWEEN ? AND ?)
-                             AND (is_flexible = ?)
+                           WHERE (is_flexible = ?)
+                            AND (event_start_dt BETWEEN ? AND ?)
+                            OR (? BETWEEN event_start_dt AND event_end_dt)
+                            OR (? BETWEEN event_start_dt AND event_end_dt)
                            ORDER BY {order_by.value}""",
-                           (from_dt.isoformat(), to_dt.isoformat(), event_type.value))
+                           (event_type.value, from_dt.isoformat(), to_dt.isoformat(), from_dt.isoformat(), to_dt.isoformat()))
 
+        #Create a list of events from the DB query results
         events = []
         for event in cursor.fetchall():
             if event[1] == 0:
@@ -478,14 +488,21 @@ class Database(metaclass=Singleton):
         conn.close()
         return events
 
-    def edit_event(self, event: Event):
+    def edit_event(self, event: Event) -> None:
+        """
+        Modifies an event's db metadata with that of the event passed as the argument
+        :param event: Event with the updated metadata
+        :return: None
+        """
 
+        #Check if the event has been modified
         if self.event_status(event) != EventStatus.MODIFIED:
             print(f"Event {event.summary} has not been modified")
 
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
+        #Update the event with new data
         cursor.execute('''
                        UPDATE events
                        SET summary = ?,
@@ -511,6 +528,12 @@ class Database(metaclass=Singleton):
 
 
     def update_google_id(self, db_id: int, google_id: str) -> None:
+        """
+        Updates the google_id for an event (used for creating new events that do not have a google_id yet)
+        :param db_id: Event ID in the database
+        :param google_id: Google ID to add to event
+        :return: None
+        """
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
@@ -555,6 +578,21 @@ class GoogleCalendar(metaclass=Singleton):
 
         return creds
 
+    @staticmethod
+    def __to_event_object(event_json) -> FixedEvent:
+        """
+        Converts event from API response to an event object
+        :param event_json: event from Google API
+        :return: Event object
+        """
+        summary = event_json['summary']
+        start_str = event_json["start"].get("dateTime", event_json["start"].get("date"))
+        end_str = event_json["end"].get("dateTime", event_json["end"].get("date"))
+        event_id = event_json["id"]
+
+        return FixedEvent(summary, datetime.fromisoformat(start_str), datetime.fromisoformat(end_str), event_id)
+
+
     def add_event(self, event: Event) -> str:
         """
         Adds an event to the Google calendar
@@ -593,13 +631,14 @@ class GoogleCalendar(metaclass=Singleton):
             print(f"An error occurred: {error}")
             sys.exit(1)
 
-    def get_events(self, start_dt: datetime, end_dt: datetime) -> List[Event]:
+    def __get_events_json(self, start_dt: datetime, end_dt: datetime, get_deleted=False) -> List[dict]:
         """
-        Returns a list of all events on a given day
+        Fetches JSON of events in a given time range from Google Calendar API
         :param start_dt: Start datetime
         :param end_dt: End datetime
-        :return: List of all events on the requested day
+        :return: List of events in JSON format
         """
+
         start_formatted = start_dt.isoformat() + 'Z'
         end_formatted = end_dt.isoformat() + 'Z'
 
@@ -612,30 +651,50 @@ class GoogleCalendar(metaclass=Singleton):
                 timeMin=start_formatted,
                 timeMax=end_formatted,
                 singleEvents=True,
+                showDeleted=get_deleted,
                 orderBy='startTime'
             ).execute()
 
             # Generate list from JSON return body
             events_json = events_result.get('items', [])
-            events_list = []
-            for event in events_json:
-                summary = event['summary']
-                start_str = event["start"].get("dateTime", event["start"].get("date"))
-                end_str = event["end"].get("dateTime", event["end"].get("date"))
-                event_id = event["id"]
-
-                events_list.append(FixedEvent(summary, datetime.fromisoformat(start_str), datetime.fromisoformat(end_str), event_id))
-
-            return events_list
+            return events_json
 
         except HttpError as error:
             print(f"An HTTP error occurred: {error}")
             sys.exit(1)
 
+    def get_events(self, start_dt: datetime, end_dt: datetime) -> tuple[List[FixedEvent], List[FixedEvent]]:
+        """
+        Returns list of current and deleted events in a given time range from the Google Calendar
+        :param start_dt: Start datetime
+        :param end_dt: End datetime
+        :return: Tuple: List of current events, List of deleted events
+        """
 
-    def edit_event(self, event: Event):
+        #Get list of events from API
+        events_json = self.__get_events_json(start_dt, end_dt, get_deleted=True)
+
+        current_events = []
+        deleted_events = []
+        #Convert events_json to Event objects
+        for event in events_json:
+            if event['status'] == 'cancelled':
+                deleted_events.append(self.__to_event_object(event))
+            else:
+                current_events.append(self.__to_event_object(event))
+        return current_events, deleted_events
+
+
+    def edit_event(self, event: Event) -> None:
+        """
+        Update details of event in Google Calendar
+        :param event: Event with new details
+        :return: None
+        """
+
         service = build("calendar", "v3", credentials=self.creds)
 
+        #Patch Request with new data
         service.events().patch(
             calendarId=self.calendar_id,
             eventId=event.google_id,
@@ -654,25 +713,29 @@ class GoogleCalendar(metaclass=Singleton):
         print(f"Event {event.summary} updated")
 
 class EventManager:
-    def __init__(self):
-        pass
-
+    """
+    Class to manage alignment of events in Google calendar and database
+    """
     @staticmethod
     def sync_gc_to_db(start_dt: datetime, end_dt: datetime) -> None:
         """
-        Adds existing events from the Google calendar on a given day to the DB
+        Adds existing events from the Google calendar in a given time range to the DB
         :param start_dt: Start datetime
         :param end_dt: End datetime
         :return: None
         """
         # Get list of all events on day from Google calendar
-        events = GoogleCalendar().get_events(start_dt, end_dt)
+        cur_events, del_events = GoogleCalendar().get_events(start_dt, end_dt)
 
-        for event in events:
+        #Sync to DB
+        for event in cur_events:
             if Database().event_status(event) == EventStatus.NEW:
                 Database().add_event(event)
             elif Database().event_status(event) == EventStatus.MODIFIED:
                 Database().edit_event(event)
+
+        for event in del_events:
+            Database().del_event(event)
 
     @staticmethod
     def submit_event(event) -> None:
@@ -690,9 +753,16 @@ class EventManager:
             Database().update_google_id(db_id, google_id)
             print(f"Submitted event {event.summary}")
 
+    @staticmethod
+    def edit_event(event: Event) -> None:
+        Database().edit_event(event)
+        GoogleCalendar().edit_event(event)
+
 
 class DateTimeConverter:
-
+    """
+    Handles data type conversion of times
+    """
     @staticmethod
     def convert_str_to_time(time_str: str) -> time:
         """
@@ -721,6 +791,11 @@ class DateTimeConverter:
 
     @staticmethod
     def convert_str_to_dt(date_str: str) -> datetime:
+        """
+        Converts string input in the format dd-mm-YYYY to a datetime.datetime object
+        :param date_str: string representation of the date (in dd-mm-YYYY format)
+        :return: datetime object representation of the date
+        """
         try:
             return datetime.strptime(date_str, "%d-%m-%Y")
         except ValueError as e:
@@ -729,64 +804,96 @@ class DateTimeConverter:
 
     @staticmethod
     def get_cur_midnight(dt: datetime) -> datetime:
+        """
+        Returns 00:00 of current day (as datetime object)
+        :param dt: current day
+        :return: midnight of the current day
+        """
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
     @staticmethod
     def get_next_midnight(dt: datetime) -> datetime:
+        """
+        Returns 00:00 of next day (as datetime object)
+        :param dt: current day
+        :return: midnight of the next day
+        """
         dt_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
         return dt_midnight + timedelta(days=1)
 
 class FlexEventOptimiser:
-
+    """
+    Handles the rearrangement of flex events when events are added/modified
+    """
     @staticmethod
-    def move_events(flex_events, fixed_events):
+    def move_events(flex_events, fixed_events) -> Tuple[List[FlexibleEvent], List[FlexibleEvent]]:
+        """
+        Moves flex events into valid slots (if no valid slots exist, a list of invalid events will be returned)
+        :param flex_events: List of flex events to be rearranged
+        :param fixed_events: List of fixed events to rearrange around
+        :return: Tuple: List of valid events after rearrangement, List of invalid events after rearrangement
+        """
         invalid_events = []
         valid_events = []
 
+        #Find a valid slot for each event
         for event in flex_events:
             slot_finder = FlexSlotFinder(event.valid_start_dt, event.valid_end_dt, event.duration)
             new_start_dt, new_end_dt = slot_finder.find_valid_slot(fixed_events)
             updated_event = FlexibleEvent(event.summary, new_start_dt, new_end_dt, event.valid_start_dt,
                                           event.valid_end_dt, event.google_id)
+
+            #If a valid slot can be found without clashes, add to valid events list and to list of events to find slot around
             if slot_finder.no_clashes:
                 valid_events.append(updated_event)
                 fixed_events.append(FixedEvent(updated_event.summary, updated_event.start_dt, updated_event.end_dt))
                 fixed_events.sort(key=lambda x: x.start_dt)
+
+            #Else, add to invalid events list
             else:
                 invalid_events.append(updated_event)
 
         return valid_events, invalid_events
 
-    @staticmethod
-    def update_moved_events(events):
-
-        for event in events:
-            Database().edit_event(event)
-            GoogleCalendar().edit_event(event)
-
 
     def optimise_flex_events(self, dt: datetime) -> None:
+        """
+        Finds optimal slot for flex events on a given day
+        :param dt: Day to optimise flex events for
+        :return: None
+        """
+
+        #Get current and next midnight (the start and end time for the day we are optimising)
         cur_midnight = DateTimeConverter().get_cur_midnight(dt)
         next_midnight = DateTimeConverter().get_next_midnight(dt)
 
+        #Get list of all fixed events on day
         fixed_events_st = Database().get_events(cur_midnight, next_midnight, EventType.FIXED)
         fixed_events_et = copy.deepcopy(fixed_events_st)
 
+        #Get 2 lists of all flex events on day, one ordered by start time, one ordered by end time
         flex_events_st = Database().get_events(cur_midnight, next_midnight, EventType.FLEXIBLE, OrderBy.START)
         flex_events_et = Database().get_events(cur_midnight, next_midnight, EventType.FLEXIBLE, OrderBy.END)
 
+        #Move flex events to valid slots for each list
         valid_events_st, invalid_events_st = self.move_events(flex_events_st, fixed_events_st)
         valid_events_et, invalid_events_et = self.move_events(flex_events_et, fixed_events_et)
 
+
+        #For the list with more valid events, update the DB and GC with the new event times
+        em = EventManager()
         if len(valid_events_st) > len(valid_events_et):
             if len(invalid_events_st) > 0:
                 print(f"Invalid events found: {invalid_events_st}")
 
-            self.update_moved_events(valid_events_st)
+            for event in valid_events_st:
+                em.edit_event(event)
         else:
             if len(invalid_events_st) > 0:
                 print(f"Invalid events found: {invalid_events_et}")
-            self.update_moved_events(valid_events_et)
+
+            for event in valid_events_et:
+                em.edit_event(event)
 
 
 def print_events(events):

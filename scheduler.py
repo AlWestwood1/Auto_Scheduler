@@ -64,11 +64,14 @@ class Event(ABC):
         self.start_dt: datetime = start_dt
         self.end_dt: datetime = end_dt
         self.is_flexible: bool = False
-        self.duration: float = (end_dt - start_dt).total_seconds() / 60
         self.summary: str = summary
         self.valid_start_dt: datetime = start_dt
         self.valid_end_dt: datetime = end_dt
         self.google_id: str = google_id
+
+    @property
+    def duration(self):
+        return (self.end_dt - self.start_dt).total_seconds() / 60
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
         """
@@ -154,12 +157,16 @@ class EventBuilder(ABC):
         :param end_time_str: String representation of the end time
         :return: Datetime representation of the start and end datetimes
         """
+
         dtc = DateTimeConverter()
         day = dtc.convert_str_to_date(date_str)
         start_time = dtc.convert_str_to_time(start_time_str)
         end_time = dtc.convert_str_to_time(end_time_str)
         start_dt = datetime.combine(day, start_time, tzinfo=zoneinfo.ZoneInfo(Timezone().timezone))
         end_dt = datetime.combine(day, end_time, tzinfo=zoneinfo.ZoneInfo(Timezone().timezone))
+
+        if end_dt <= start_dt:
+            raise ValueError("Start time must be before end time")
 
         return start_dt, end_dt
 
@@ -180,7 +187,11 @@ class FixedEventBuilder(EventBuilder):
         """
 
         #Generate datetime representation of start and end dates
-        start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
+        try:
+            start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
+        except ValueError as e:
+            print(e)
+            sys.exit(1)
 
         clashes = Database().get_events(start_dt, end_dt, EventType.FIXED)
         if len(clashes) > 0:
@@ -219,7 +230,11 @@ class FlexibleEventBuilder(EventBuilder):
         """
 
         #Generate valid timerange datetimes from the valid start and end dates/times
-        valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
+        try:
+            valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
+        except ValueError as e:
+            print(e)
+            sys.exit(1)
 
         # Fetch list of all events in the valid window in chronological order
         clashes = Database().get_events(valid_start_dt, valid_end_dt, EventType.ALL)

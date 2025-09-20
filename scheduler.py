@@ -185,6 +185,8 @@ class FixedEventBuilder(EventBuilder):
         :param summary: Event summary
         :return: FixedEvent object containing event information provided in input args
         """
+        if not summary or summary == '':
+            raise ValueError("Summary cannot be empty")
 
         #Generate datetime representation of start and end dates
         try:
@@ -229,6 +231,9 @@ class FlexibleEventBuilder(EventBuilder):
         :return: FlexibleEvent object containing event information provided in input args
         """
 
+        if not summary or summary == '':
+            raise ValueError("Summary cannot be empty")
+
         #Generate valid timerange datetimes from the valid start and end dates/times
         try:
             valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
@@ -236,10 +241,16 @@ class FlexibleEventBuilder(EventBuilder):
             print(e)
             sys.exit(1)
 
+
         # Fetch list of all events in the valid window in chronological order
         clashes = Database().get_events(valid_start_dt, valid_end_dt, EventType.ALL)
 
-        slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
+        try:
+            slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
+        except ValueError as e:
+            print(e)
+            sys.exit(1)
+
         start_dt, end_dt = slot_finder.find_valid_slot(clashes)
 
         if not slot_finder.no_clashes:
@@ -255,6 +266,12 @@ class FlexSlotFinder:
     Finds valid spaces for flexible events given the start and end valid ranges
     """
     def __init__(self, valid_start_dt: datetime, valid_end_dt: datetime, duration: int):
+        if not valid_start_dt < valid_end_dt:
+            raise ValueError("Start time must be before end time")
+
+        if (valid_end_dt - valid_start_dt).total_seconds() / 60 < duration:
+            raise ValueError("Duration cannot be longer than the valid range of the event")
+
         self.valid_start_dt = valid_start_dt
         self.valid_end_dt = valid_end_dt
         self.duration = duration

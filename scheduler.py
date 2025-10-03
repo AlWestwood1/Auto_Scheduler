@@ -27,6 +27,10 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
+    @classmethod
+    def clear_instances(cls):
+        cls._instances = {}
+
 
 class EventType(Enum):
     """
@@ -321,8 +325,8 @@ class Timezone(metaclass=Singleton):
 
 class Database(metaclass=Singleton):
 
-    def __init__(self) -> None:
-        self.db_name = "events.db"
+    def __init__(self, db_name="events.db") -> None:
+        self.db_name = db_name
         self.__create_table()
 
     def __create_table(self) -> None:
@@ -416,7 +420,7 @@ class Database(metaclass=Singleton):
 
         # If the event is a duplicate, return False
         if self.event_status(event) != EventStatus.NEW:
-            return -1
+            raise ValueError(f"Event {event.summary} already exists in the database")
 
         # Connect to the DB
         conn = sqlite3.connect(self.db_name)
@@ -458,8 +462,7 @@ class Database(metaclass=Singleton):
 
         #Check that event exists in the DB
         if self.event_status(event) == EventStatus.NEW:
-            print(f"Event {event.summary} does not exist in the database")
-            return
+            raise ValueError(f"Event {event.summary} does not exist in the database")
 
         #Delete event
         conn = sqlite3.connect(self.db_name)
@@ -467,7 +470,7 @@ class Database(metaclass=Singleton):
         cursor.execute('''
         DELETE FROM events
             WHERE google_id = ?
-        ''', event.google_id)
+        ''', (event.google_id,))
 
         conn.commit()
         conn.close()
@@ -482,6 +485,10 @@ class Database(metaclass=Singleton):
         :param order_by: Order by (start times or end times)
         :return: List of events in range
         """
+
+        if not from_dt < to_dt:
+            raise ValueError("Start date/time must be before end date/time")
+
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
 
@@ -501,9 +508,11 @@ class Database(metaclass=Singleton):
                            SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
                            FROM events
                            WHERE (is_flexible = ?)
-                            AND (event_start_dt BETWEEN ? AND ?)
-                            OR (? BETWEEN event_start_dt AND event_end_dt)
-                            OR (? BETWEEN event_start_dt AND event_end_dt)
+                            AND (
+                                (event_start_dt BETWEEN ? AND ?)
+                                OR (? BETWEEN event_start_dt AND event_end_dt)
+                                OR (? BETWEEN event_start_dt AND event_end_dt)
+                            )
                            ORDER BY {order_by.value}""",
                            (event_type.value, from_dt.isoformat(), to_dt.isoformat(), from_dt.isoformat(), to_dt.isoformat()))
 
@@ -529,7 +538,7 @@ class Database(metaclass=Singleton):
 
         #Check if the event has been modified
         if self.event_status(event) != EventStatus.MODIFIED:
-            print(f"Event {event.summary} has not been modified")
+            raise ValueError(f"Event {event.summary} has not been modified")
 
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
@@ -776,14 +785,17 @@ class EventManager:
         :param event: Event to add to calendar and db
         :return: None
         """
-        #Add event to database, return whether it was added successfully
-        db_id = Database().add_event(event)
-
+        # Add event to database, return whether it was added successfully
+        try:
+            db_id = Database().add_event(event)
+        except ValueError as e:
+            print(e)
+            sys.exit(1)
         #If event was added to the DB successfully, add to the Google Calendar
-        if db_id != -1:
-            google_id = GoogleCalendar().add_event(event)
-            Database().update_google_id(db_id, google_id)
-            print(f"Submitted event {event.summary}")
+
+        google_id = GoogleCalendar().add_event(event)
+        Database().update_google_id(db_id, google_id)
+        print(f"Submitted event {event.summary}")
 
     @staticmethod
     def edit_event(event: Event) -> None:
@@ -939,8 +951,8 @@ def print_events(events):
       print(start, event["summary"])
 
 
-
 def main():
+
     dtc = DateTimeConverter()
     dt = dtc.convert_str_to_dt("05-08-2025")
     start_dt = dtc.get_cur_midnight(dt)

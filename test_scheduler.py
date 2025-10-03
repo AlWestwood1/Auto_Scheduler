@@ -1,8 +1,12 @@
 import string
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import random
 from tzlocal import get_localzone_name
+import os
+import sqlite3
+
+from googleapiclient.errors import HttpError
 
 import scheduler
 from datetime import datetime, timedelta
@@ -289,14 +293,14 @@ class TestFlexSlotFinder(unittest.TestCase):
 
     def test_fail_init_end_time_before_start_time(self):
         with self.assertRaises(ValueError):
-            flex_slot_finder = scheduler.FlexSlotFinder(datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
-                                                        datetime(2025, 8, 5, 12, 30, tzinfo=self.tz),
-                                                        30)
+            scheduler.FlexSlotFinder(datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                     datetime(2025, 8, 5, 12, 30, tzinfo=self.tz),
+                                     30)
 
         with self.assertRaises(ValueError):
-            flex_slot_finder = scheduler.FlexSlotFinder(datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
-                                                        datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
-                                                        0)
+            scheduler.FlexSlotFinder(datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                     datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                     0)
 
     def test_no_valid_slot_found(self):
         flex_slot_finder = scheduler.FlexSlotFinder(datetime(2025, 8, 5, 12, 0, tzinfo=self.tz),
@@ -318,6 +322,293 @@ class TestFlexSlotFinder(unittest.TestCase):
         self.assertEqual(start_dt, datetime(2025, 8, 5, 20, 0, tzinfo=self.tz))
         self.assertEqual(end_dt, datetime(2025, 8, 5, 20, 30, tzinfo=self.tz))
         self.assertEqual(flex_slot_finder.no_clashes, True)
+
+class TestTimezone(unittest.TestCase):
+    def test_singleton_behavior(self):
+        tz1 = scheduler.Timezone()
+        tz2 = scheduler.Timezone()
+        self.assertIs(tz1, tz2)
+
+    def test_timezone_is_localzone_name(self):
+        tz = scheduler.Timezone()
+        self.assertEqual(tz.timezone, get_localzone_name())
+
+class TestDatabase(unittest.TestCase):
+    def setUp(self):
+        self.tz = zoneinfo.ZoneInfo(get_localzone_name())
+        scheduler.Database.clear_instances()
+        self.db = scheduler.Database("test_scheduler.db")
+
+    def test_singleton_behavior(self):
+        db1 = scheduler.Database("test_scheduler.db")
+        db2 = scheduler.Database("test_scheduler.db")
+        self.assertIs(db1, db2)
+
+    def test_events_table_created(self):
+        # Connect to the test database
+        import sqlite3
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        # Query for the events table schema
+        cursor.execute("PRAGMA table_info(events);")
+        columns = [col[1] for col in cursor.fetchall()]
+        expected_columns = [
+            "id", "summary", "is_flexible", "event_start_dt", "event_end_dt",
+            "duration", "valid_start_dt", "valid_end_dt", "timezone",
+            "google_id", "last_updated"
+        ]
+        self.assertEqual(columns, expected_columns)
+        conn.close()
+
+    def test_event_status(self):
+        event = RandomEventBuilder().generate_fixed_event()
+
+        # Event is not in DB yet, should be NEW
+        status = self.db.event_status(event)
+        self.assertEqual(status, scheduler.EventStatus.NEW)
+
+        # Add event to DB
+        self.db.add_event(event)
+
+        # Event is now in DB and unchanged, should be UNCHANGED
+        status = self.db.event_status(event)
+        self.assertEqual(status, scheduler.EventStatus.UNCHANGED)
+
+        # Modify event summary
+        event.summary = event.summary + "_modified"
+        status = self.db.event_status(event)
+        self.assertEqual(status, scheduler.EventStatus.MODIFIED)
+
+    def test_add_event_successful(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM events WHERE google_id = ?", (event.google_id,))
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[1], event.summary)
+        self.assertEqual(row[2], event.is_flexible)
+        self.assertEqual(row[3], event.start_dt.isoformat())
+        self.assertEqual(row[4], event.end_dt.isoformat())
+        self.assertEqual(row[5], event.duration)
+        self.assertEqual(row[6], event.valid_start_dt.isoformat())
+        self.assertEqual(row[7], event.valid_end_dt.isoformat())
+        self.assertEqual(row[8], get_localzone_name())
+        self.assertEqual(row[9], event.google_id)
+        conn.close()
+
+    def test_add_event_fails_duplicate_event(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+        with self.assertRaises(ValueError):
+            self.db.add_event(event)
+
+    def test_del_event_successful(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+        self.db.del_event(event)
+
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM events WHERE google_id = ?", (event.google_id,))
+        row = cursor.fetchone()
+        self.assertIsNone(row)
+        conn.close()
+
+    def test_del_event_fails_event_not_found(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        with self.assertRaises(ValueError):
+            self.db.del_event(event)
+
+    def test_edit_event_updates_event(self):
+        # Create and add a fixed event
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+
+        # Modify event fields
+        new_summary = event.summary + "_edited"
+        new_start_dt = event.start_dt + timedelta(hours=1)
+        new_end_dt = event.end_dt + timedelta(hours=1)
+        event.summary = new_summary
+        event.start_dt = new_start_dt
+        event.end_dt = new_end_dt
+        event.valid_start_dt = new_start_dt
+        event.valid_end_dt = new_end_dt
+
+        # Edit the event in the database
+        self.db.edit_event(event)
+
+        # Fetch the event from the database and check updated fields
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT summary, event_start_dt, event_end_dt FROM events WHERE google_id = ?",
+                       (event.google_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], new_summary)
+        self.assertEqual(row[1], new_start_dt.isoformat())
+        self.assertEqual(row[2], new_end_dt.isoformat())
+
+    def test_edit_event_fails_event_not_found(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        with self.assertRaises(ValueError):
+            self.db.edit_event(event)
+
+    def test_edit_event_fails_no_changes(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+        with self.assertRaises(ValueError):
+            self.db.edit_event(event)
+
+    def test_get_events_fails_invalid_date_range(self):
+        from_dt = datetime(2025, 8, 5, 12, 0, tzinfo=self.tz)
+        to_dt = datetime(2025, 8, 5, 11, 0, tzinfo=self.tz)
+        with self.assertRaises(ValueError):
+            self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+
+    def test_get_events_returns_correct_events(self):
+        # Create two fixed and one flexible event
+        builder = RandomEventBuilder()
+        fixed_event1 = builder.generate_fixed_event()
+        fixed_event2 = builder.generate_fixed_event()
+        flex_event = builder.generate_flexible_event()
+
+        # Add events to the database
+        self.db.add_event(fixed_event1)
+        self.db.add_event(fixed_event2)
+        self.db.add_event(flex_event)
+
+        # Define a range that includes all events
+        from_dt = min(fixed_event1.start_dt, fixed_event2.start_dt, flex_event.start_dt)
+        to_dt = max(fixed_event1.end_dt, fixed_event2.end_dt, flex_event.end_dt)
+
+        print(f"From: {from_dt}, To: {to_dt}")
+
+        # Get all events
+        all_events = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+        self.assertEqual(len(all_events), 3)
+        # Get only fixed events
+        fixed_events = self.db.get_events(from_dt, to_dt, event_type=scheduler.EventType.FIXED)
+        print(fixed_events)
+        self.assertTrue(all(isinstance(e, scheduler.FixedEvent) for e in fixed_events))
+        self.assertEqual(len(fixed_events), 2)
+
+        # Get only flexible events
+        flex_events = self.db.get_events(from_dt, to_dt, scheduler.EventType.FLEXIBLE)
+        print(flex_events)
+        self.assertTrue(all(isinstance(e, scheduler.FlexibleEvent) for e in flex_events))
+        self.assertEqual(len(flex_events), 1)
+
+
+    def test_get_events_order_by(self):
+        # Create events with specific start times
+        event1 = scheduler.FixedEvent("Event 1",
+                                      datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                      datetime(2025, 8, 5, 18, 0, tzinfo=self.tz))
+        event2 = scheduler.FixedEvent("Event 2",
+                                      datetime(2025, 8, 5, 12, 0, tzinfo=self.tz),
+                                      datetime(2025, 8, 5, 13, 0, tzinfo=self.tz))
+        event3 = scheduler.FixedEvent("Event 3",
+                                      datetime(2025, 8, 5, 16, 0, tzinfo=self.tz),
+                                      datetime(2025, 8, 5, 17, 0, tzinfo=self.tz))
+
+        # Add events to the database
+        self.db.add_event(event1)
+        self.db.add_event(event2)
+        self.db.add_event(event3)
+
+        from_dt = datetime(2025, 8, 5, 0, 0, tzinfo=self.tz)
+        to_dt = datetime(2025, 8, 6, 0, 0, tzinfo=self.tz)
+
+        events = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0].summary, "Event 2")
+        self.assertEqual(events[1].summary, "Event 1")
+        self.assertEqual(events[2].summary, "Event 3")
+
+        # Check order by End date
+        events_desc = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL, order_by=scheduler.OrderBy.END)
+        self.assertEqual(len(events_desc), 3)
+        self.assertEqual(events_desc[0].summary, "Event 2")
+        self.assertEqual(events_desc[1].summary, "Event 3")
+        self.assertEqual(events_desc[2].summary, "Event 1")
+
+    def test_update_timestamp_successful(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        self.db.add_event(event)
+
+        # Capture the original timestamp
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_updated FROM events WHERE google_id = ?", (event.google_id,))
+        original_timestamp = cursor.fetchone()[0]
+        conn.close()
+
+        event.summary = event.summary + "_updated"
+        # Update the timestamp
+        self.db.edit_event(event)
+
+        # Fetch the updated timestamp
+        conn = sqlite3.connect(self.db.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_updated FROM events WHERE google_id = ?", (event.google_id,))
+        updated_timestamp = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertNotEqual(original_timestamp, updated_timestamp)
+
+    def tearDown(self):
+        if os.path.exists("test_scheduler.db"):
+            os.remove("test_scheduler.db")
+
+        scheduler.Database.clear_instances()
+
+class TestGoogleCalendar(unittest.TestCase):
+
+    @patch("scheduler.build")
+    @patch("scheduler.Credentials")
+    def test_add_event_successfully(self, mock_creds, mock_build):
+        # Mock the service and its methods
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_insert = MagicMock()
+        mock_insert.execute.return_value = {"id": "fake_id", "htmlLink": "http://fake"}
+        mock_events.insert.return_value = mock_insert
+        mock_service.events.return_value = mock_events
+        mock_build.return_value = mock_service
+
+        # Create a fake event
+        event = RandomEventBuilder().generate_fixed_event()
+
+        # Patch authentication to avoid file I/O
+        with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
+            gc = scheduler.GoogleCalendar()
+            event_id = gc.add_event(event)
+            self.assertEqual(event_id, "fake_id")
+
+    @patch("scheduler.build")
+    @patch("scheduler.Credentials")
+    @patch("scheduler.sys.exit", side_effect=SystemExit)
+    def test_add_event_handles_http_error(self, mock_exit, mock_creds, mock_build):
+        # Mock the service to raise HttpError on insert().execute()
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_insert = MagicMock()
+        mock_insert.execute.side_effect = HttpError(resp=MagicMock(), content=b"error")
+        mock_events.insert.return_value = mock_insert
+        mock_service.events.return_value = mock_events
+        mock_build.return_value = mock_service
+
+        event = RandomEventBuilder().generate_fixed_event()
+        with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
+            gc = scheduler.GoogleCalendar()
+            with self.assertRaises(SystemExit):
+                gc.add_event(event)
+            mock_exit.assert_called_with(1)
 
 if __name__ == '__main__':
     unittest.main()

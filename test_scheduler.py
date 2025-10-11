@@ -7,7 +7,6 @@ import os
 import sqlite3
 
 from googleapiclient.errors import HttpError
-
 import scheduler
 from datetime import datetime, timedelta
 import zoneinfo
@@ -569,6 +568,11 @@ class TestDatabase(unittest.TestCase):
 
 class TestGoogleCalendar(unittest.TestCase):
 
+    def test_singleton_behavior(self):
+        gc1 = scheduler.GoogleCalendar()
+        gc2 = scheduler.GoogleCalendar()
+        self.assertIs(gc1, gc2)
+
     @patch("scheduler.build")
     @patch("scheduler.Credentials")
     def test_add_event_successfully(self, mock_creds, mock_build):
@@ -590,6 +594,7 @@ class TestGoogleCalendar(unittest.TestCase):
             event_id = gc.add_event(event)
             self.assertEqual(event_id, "fake_id")
 
+
     @patch("scheduler.build")
     @patch("scheduler.Credentials")
     @patch("scheduler.sys.exit", side_effect=SystemExit)
@@ -609,6 +614,44 @@ class TestGoogleCalendar(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gc.add_event(event)
             mock_exit.assert_called_with(1)
+
+    @patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__get_events_json")
+    @patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__to_event_object")
+    def test_get_events_returns_current_and_deleted(self, mock_to_event, mock_get_json):
+        # Prepare mock data
+        start_dt = datetime(2025, 8, 5, 0, 0)
+        end_dt = datetime(2025, 8, 6, 0, 0)
+        event_json_current = {'status': 'confirmed', 'summary': 'Event1', 'start': {'dateTime': '2025-08-05T10:00:00'},
+                              'end': {'dateTime': '2025-08-05T11:00:00'}, 'id': 'id1'}
+        event_json_deleted = {'status': 'cancelled', 'summary': 'Event2', 'start': {'dateTime': '2025-08-05T12:00:00'},
+                              'end': {'dateTime': '2025-08-05T13:00:00'}, 'id': 'id2'}
+        mock_get_json.return_value = [event_json_current, event_json_deleted]
+        mock_to_event.side_effect = ['event_obj_current', 'event_obj_deleted']
+
+        with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
+            gc = scheduler.GoogleCalendar()
+            current, deleted = gc.get_events(start_dt, end_dt)
+
+        self.assertEqual(current, ['event_obj_current'])
+        self.assertEqual(deleted, ['event_obj_deleted'])
+        mock_get_json.assert_called_once_with(start_dt, end_dt, get_deleted=True)
+        self.assertEqual(mock_to_event.call_count, 2)
+
+    def test_get_events_raises_value_error_for_invalid_range(self):
+        start_dt = datetime(2025, 8, 6, 0, 0)
+        end_dt = datetime(2025, 8, 7, 0, 0)
+        with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
+            gc = scheduler.GoogleCalendar()
+            with self.assertRaises(ValueError):
+                gc.get_events(start_dt, end_dt)
+
+
+    def test_edit_event_fails_event_not_found(self):
+        event = RandomEventBuilder().generate_fixed_event()
+        with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
+            gc = scheduler.GoogleCalendar()
+            with self.assertRaises(ValueError):
+                gc.edit_event(event)
 
 if __name__ == '__main__':
     unittest.main()

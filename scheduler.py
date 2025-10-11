@@ -711,6 +711,8 @@ class GoogleCalendar(metaclass=Singleton):
         :param end_dt: End datetime
         :return: Tuple: List of current events, List of deleted events
         """
+        if not start_dt < end_dt:
+            raise ValueError("Start date/time must be before end date/time")
 
         #Get list of events from API
         events_json = self.__get_events_json(start_dt, end_dt, get_deleted=True)
@@ -725,6 +727,21 @@ class GoogleCalendar(metaclass=Singleton):
                 current_events.append(self.__to_event_object(event))
         return current_events, deleted_events
 
+    def event_exists(self, event_id: str) -> bool:
+        """
+        Checks if an event with the given event_id exists in the Google Calendar.
+        :param event_id: The Google Calendar event ID.
+        :return: True if the event exists, False otherwise.
+        """
+        try:
+            service = build("calendar", "v3", credentials=self.creds)
+            service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
+            return True
+        except HttpError as error:
+            if error.resp.status == 404:
+                return False
+            else:
+                raise
 
     def edit_event(self, event: Event) -> None:
         """
@@ -732,6 +749,9 @@ class GoogleCalendar(metaclass=Singleton):
         :param event: Event with new details
         :return: None
         """
+        if not self.event_exists(event.google_id):
+            raise ValueError(f"Event {event.summary} does not exist in Google Calendar")
+
 
         service = build("calendar", "v3", credentials=self.creds)
 

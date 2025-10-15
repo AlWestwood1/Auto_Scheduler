@@ -711,7 +711,9 @@ class GoogleCalendar(metaclass=Singleton):
         :param end_dt: End datetime
         :return: Tuple: List of current events, List of deleted events
         """
+        print(start_dt, end_dt)
         if not start_dt < end_dt:
+            print('error')
             raise ValueError("Start date/time must be before end date/time")
 
         #Get list of events from API
@@ -787,6 +789,9 @@ class EventManager:
         """
         # Get list of all events on day from Google calendar
         cur_events, del_events = GoogleCalendar().get_events(start_dt, end_dt)
+
+        if not cur_events and not del_events:
+            raise ValueError("No events found in Google Calendar in the given time range")
 
         #Sync to DB
         for event in cur_events:

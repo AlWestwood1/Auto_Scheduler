@@ -615,6 +615,7 @@ class TestGoogleCalendar(unittest.TestCase):
                 gc.add_event(event)
             mock_exit.assert_called_with(1)
 
+
     @patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__get_events_json")
     @patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__to_event_object")
     def test_get_events_returns_current_and_deleted(self, mock_to_event, mock_get_json):
@@ -638,12 +639,13 @@ class TestGoogleCalendar(unittest.TestCase):
         self.assertEqual(mock_to_event.call_count, 2)
 
     def test_get_events_raises_value_error_for_invalid_range(self):
-        start_dt = datetime(2025, 8, 6, 0, 0)
-        end_dt = datetime(2025, 8, 7, 0, 0)
+        start_dt = datetime(2025, 8, 6, 4, 0)
+        end_dt = datetime(2025, 8, 6, 3, 0)
         with patch.object(scheduler.GoogleCalendar, "_GoogleCalendar__authenticate", return_value=MagicMock()):
             gc = scheduler.GoogleCalendar()
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as cm:
                 gc.get_events(start_dt, end_dt)
+            self.assertEqual(str(cm.exception), "Start date/time must be before end date/time")
 
 
     def test_edit_event_fails_event_not_found(self):
@@ -652,6 +654,163 @@ class TestGoogleCalendar(unittest.TestCase):
             gc = scheduler.GoogleCalendar()
             with self.assertRaises(ValueError):
                 gc.edit_event(event)
+
+class TestEventManager(unittest.TestCase):
+    def setUp(self):
+        self.tz = zoneinfo.ZoneInfo(get_localzone_name())
+
+        self.cur_events = [scheduler.FixedEvent("Event 1",
+                                                  datetime(2025, 8, 5, 12, 0, tzinfo=self.tz),
+                                                  datetime(2025, 8, 5, 13, 0, tzinfo=self.tz)),
+                             scheduler.FixedEvent("Event 2",
+                                                  datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                                  datetime(2025, 8, 5, 20, 0, tzinfo=self.tz))]
+
+        self.del_events = [scheduler.FixedEvent("Del Event 1",
+                                                datetime(2025, 8, 5, 13, 0, tzinfo=self.tz),
+                                                datetime(2025, 8, 5, 14, 0, tzinfo=self.tz)),
+                           scheduler.FixedEvent("Del Event 2",
+                                                datetime(2025, 8, 5, 15, 0, tzinfo=self.tz),
+                                                datetime(2025, 8, 5, 16, 0, tzinfo=self.tz))]
+
+    @patch("scheduler.GoogleCalendar.get_events")
+    def test_sync_fails_no_events_in_current_or_deleted_lists(self, mock_gc_events):
+        mock_gc_events.return_value = ([], [])
+        start_dt = datetime(2025, 8, 5, 0, 0, tzinfo=self.tz)
+        end_dt = datetime(2025, 8, 6, 1, 0, tzinfo=self.tz)
+        em = scheduler.EventManager()
+        with self.assertRaises(ValueError):
+            em.sync_gc_to_db(start_dt, end_dt)
+
+    @patch("scheduler.Database.add_event")
+    @patch("scheduler.Database.event_status")
+    @patch("scheduler.GoogleCalendar.get_events")
+    def test_sync_gc_to_db_handles_new_events(self, mock_gc_events, mock_event_status, mock_add_event):
+        # Create a mock event
+        mock_gc_events.return_value = (self.cur_events, [])
+        mock_event_status.return_value = scheduler.EventStatus.NEW
+
+        # Call the method
+        scheduler.EventManager.sync_gc_to_db(datetime(2025, 8, 5, 0, 0), datetime(2025, 8, 6, 0, 0))
+
+        # Assert add_event was called with the new event
+        assert mock_add_event.call_count == len(self.cur_events)
+
+    @patch("scheduler.Database.edit_event")
+    @patch("scheduler.Database.event_status")
+    @patch("scheduler.GoogleCalendar.get_events")
+    def test_sync_gc_to_db_handles_modified_events(self, mock_gc_events, mock_event_status, mock_edit_event):
+        # Create a mock event
+        mock_gc_events.return_value = (self.cur_events, [])
+        mock_event_status.return_value = scheduler.EventStatus.MODIFIED
+
+        # Call the method
+        scheduler.EventManager.sync_gc_to_db(datetime(2025, 8, 5, 0, 0), datetime(2025, 8, 6, 0, 0))
+
+        # Assert add_event was called with the new event
+        assert mock_edit_event.call_count == len(self.cur_events)
+
+    @patch("scheduler.Database.del_event")
+    @patch("scheduler.GoogleCalendar.get_events")
+    def test_sync_gc_to_db_handles_deleted_events(self, mock_gc_events, mock_del_event):
+        # Create a mock event
+        mock_gc_events.return_value = ([], self.del_events)
+
+        # Call the method
+        scheduler.EventManager.sync_gc_to_db(datetime(2025, 8, 5, 0, 0), datetime(2025, 8, 6, 0, 0))
+
+        # Assert add_event was called with the new event
+        assert mock_del_event.call_count == len(self.cur_events)
+
+
+class TestDateTimeConverter(unittest.TestCase):
+    def setUp(self):
+        self.dtc = scheduler.DateTimeConverter()
+
+    def test_convert_str_to_time_successful(self):
+        time_str = "14:30"
+        expected_time = datetime(2025, 8, 5, 14, 30).time()
+        result = self.dtc.convert_str_to_time(time_str)
+        self.assertEqual(result, expected_time)
+
+    @patch("scheduler.sys.exit", side_effect=SystemExit)
+    def test_convert_str_to_time_fails_wrong_time_format(self, mock_exit):
+        invalid_time_formats = ["12-00",
+                                "12:00:01",
+                                "12.00",
+                                "abc",
+                                "",
+                                "28:00",
+                                "12:76"]
+
+        for time_str in invalid_time_formats:
+            with self.assertRaises(SystemExit):
+                self.dtc.convert_str_to_time(time_str)
+
+        self.assertEqual(mock_exit.call_count, len(invalid_time_formats))
+        mock_exit.assert_called_with(1)
+
+    def test_convert_str_to_date_successful(self):
+        date_str = "05-08-2025"
+        expected_date = datetime(2025, 8, 5, 14, 30).date()
+        result = self.dtc.convert_str_to_date(date_str)
+        self.assertEqual(result, expected_date)
+
+    @patch("scheduler.sys.exit", side_effect=SystemExit)
+    def test_convert_str_to_date_fails_wrong_date_format(self, mock_exit):
+        invalid_date_formats = ["05.08.2025",
+                                "05/08/2025",
+                                "2025-05-08",
+                                "cat",
+                                "12345",
+                                "65-08-2025",
+                                "12-70-2025",
+                                "05-08-25"]
+
+        for date_str in invalid_date_formats:
+            with self.assertRaises(SystemExit):
+                self.dtc.convert_str_to_date(date_str)
+
+        self.assertEqual(mock_exit.call_count, len(invalid_date_formats))
+        mock_exit.assert_called_with(1)
+
+    def test_convert_str_to_dt_successful(self):
+        date_str = "05-08-2025"
+        expected_dt = datetime(2025, 8, 5)
+        result = self.dtc.convert_str_to_dt(date_str)
+        self.assertEqual(result, expected_dt)
+
+    @patch("scheduler.sys.exit", side_effect=SystemExit)
+    def test_convert_str_to_dt_fails_wrong_date_format(self, mock_exit):
+        invalid_date_formats = ["05.08.2025",
+                                "05/08/2025",
+                                "2025-05-08",
+                                "cat",
+                                "12345",
+                                "65-08-2025",
+                                "12-70-2025",
+                                "05-08-25"]
+
+        for date_str in invalid_date_formats:
+            with self.assertRaises(SystemExit):
+                self.dtc.convert_str_to_dt(date_str)
+
+        self.assertEqual(mock_exit.call_count, len(invalid_date_formats))
+        mock_exit.assert_called_with(1)
+
+    def test_get_cur_midnight_successful(self):
+        tz = zoneinfo.ZoneInfo(get_localzone_name())
+        now = datetime.now(tz)
+        expected_midnight = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz)
+        result = self.dtc.get_cur_midnight(now)
+        self.assertEqual(result, expected_midnight)
+
+    def test_get_next_midnight_successful(self):
+        tz = zoneinfo.ZoneInfo(get_localzone_name())
+        now = datetime.now(tz)
+        expected_midnight = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz) + timedelta(days=1)
+        result = self.dtc.get_next_midnight(now)
+        self.assertEqual(result, expected_midnight)
 
 if __name__ == '__main__':
     unittest.main()

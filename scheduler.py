@@ -8,6 +8,9 @@ from typing import Tuple, List
 from abc import ABC
 import copy
 from enum import Enum
+import gurobipy as gp
+from gurobipy import GRB
+import itertools
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -801,7 +804,10 @@ class EventManager:
                 Database().edit_event(event)
 
         for event in del_events:
-            Database().del_event(event)
+            try:
+                Database().del_event(event)
+            except ValueError as error:
+                print(error)
 
     @staticmethod
     def submit_event(event) -> None:
@@ -894,6 +900,42 @@ class FlexEventOptimiser:
     """
     Handles the rearrangement of flex events when events are added/modified
     """
+    def __init__(self, precision = 15) -> None:
+        self.mins_in_day = 1440
+        self.precision = precision
+        self.num_slots = self.mins_in_day // self.precision
+
+    def convert_time_to_slot(self, dt: datetime):
+        mins_after_midnight = dt.hour * 60 + dt.minute
+        return mins_after_midnight // self.precision
+
+    def preprocess_events(self, events_list: List[Event]) -> dict:
+        processed_events = {}
+        #Convert event start time, end time, and duration into time slots and store in dictionary of events
+        for event in events_list:
+            start_slot = self.convert_time_to_slot(event.start_dt)
+            end_slot = self.convert_time_to_slot(event.end_dt)
+            duration_slot = event.duration // self.precision
+            processed_events[event.google_id] = (duration_slot, start_slot, end_slot)
+
+        return processed_events
+
+    def ILP_model_setup(self, dt: datetime):
+        # Get current and next midnight (the start and end time for the day we are optimising)
+        cur_midnight = DateTimeConverter().get_cur_midnight(dt)
+        next_midnight = DateTimeConverter().get_next_midnight(dt)
+
+        events_list = Database().get_events(cur_midnight, next_midnight, EventType.ALL, OrderBy.START)
+
+        processed_events = self.preprocess_events(events_list)
+
+        return processed_events
+
+
+
+
+
+
     @staticmethod
     def move_events(flex_events, fixed_events) -> Tuple[List[FlexibleEvent], List[FlexibleEvent]]:
         """
@@ -978,30 +1020,39 @@ def print_events(events):
 
 def main():
 
+    """
     dtc = DateTimeConverter()
-    dt = dtc.convert_str_to_dt("05-08-2025")
+    dt = dtc.convert_str_to_dt("20-10-2025")
     start_dt = dtc.get_cur_midnight(dt)
     end_dt = dtc.get_next_midnight(dt)
 
 
     em = EventManager()
-    em.sync_gc_to_db(start_dt, end_dt)
+    #em.sync_gc_to_db(start_dt, end_dt)
 
+    fixed_eb = FixedEventBuilder()
+    new_fixed_event = fixed_eb.create_fixed_event("20-10-2025",
+                                         "19:00",
+                                         "20:00",
+                                                  "Test Fixed Event")
 
-    """
     eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("05-08-2025",
-                                         "18:00",
-                                         "21:00",
+    new_event = eb.create_flexible_event("20-10-2025",
+                                         "19:00",
+                                         "21:30",
                                          30,
                                          "Test Flexible event 4")
     #print(new_event)
-
+    em.submit_event(new_fixed_event)
     em.submit_event(new_event)
     """
-    #new_event.submit_event(creds, db_name="events.db")
+    dtc = DateTimeConverter()
+    dt = dtc.convert_str_to_dt("20-10-2025")
+    optimiser = FlexEventOptimiser()
 
-    FlexEventOptimiser().optimise_flex_events(dt)
+    processed_events = optimiser.ILP_model_setup(dt)
+
+    print(processed_events)
 
 
 

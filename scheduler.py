@@ -8,8 +8,7 @@ from typing import Tuple, List
 from abc import ABC
 import copy
 from enum import Enum
-import gurobipy as gp
-from gurobipy import GRB
+import pulp
 import itertools
 
 from google.auth.transport.requests import Request
@@ -77,8 +76,8 @@ class Event(ABC):
         self.google_id: str = google_id
 
     @property
-    def duration(self):
-        return (self.end_dt - self.start_dt).total_seconds() / 60
+    def duration(self) -> int:
+        return int((self.end_dt - self.start_dt).total_seconds() // 60)
 
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
         """
@@ -532,10 +531,11 @@ class Database(metaclass=Singleton):
         conn.close()
         return events
 
-    def edit_event(self, event: Event) -> None:
+    def edit_event(self, event: Event, update_valid_window: bool = False) -> None:
         """
         Modifies an event's db metadata with that of the event passed as the argument
         :param event: Event with the updated metadata
+        :param update_valid_window: Whether to also update the valid window of the event (for flexible events)
         :return: None
         """
 
@@ -553,8 +553,6 @@ class Database(metaclass=Singleton):
                            event_start_dt = ?,
                            event_end_dt   = ?,
                            duration = ?,
-                           valid_start_dt = ?,
-                           valid_end_dt = ?,
                            timezone = ?,
                            last_updated = ?
                        WHERE google_id = ?
@@ -562,11 +560,21 @@ class Database(metaclass=Singleton):
                         event.start_dt.isoformat(),
                         event.end_dt.isoformat(),
                         event.duration,
-                         event.valid_start_dt.isoformat(),
-                         event.valid_end_dt.isoformat(),
                          Timezone().timezone,
                         datetime.now().isoformat(),
                         event.google_id),)
+
+        #TODO: ensure updates to start/end time that lie outside the valid window also update the valid window accordingly
+        if update_valid_window:
+            cursor.execute('''
+            UPDATE events
+            SET valid_start_dt = ?,
+                valid_end_dt = ?
+            WHERE google_id = ?
+                ''', (event.valid_start_dt.isoformat(),
+                                event.valid_end_dt.isoformat(),
+                                event.google_id),)
+
         conn.commit()
         conn.close()
 
@@ -801,6 +809,7 @@ class EventManager:
             if Database().event_status(event) == EventStatus.NEW:
                 Database().add_event(event)
             elif Database().event_status(event) == EventStatus.MODIFIED:
+                #find valid start and end times, update first to prevent overwriting
                 Database().edit_event(event)
 
         for event in del_events:
@@ -909,18 +918,24 @@ class FlexEventOptimiser:
         mins_after_midnight = dt.hour * 60 + dt.minute
         return mins_after_midnight // self.precision
 
+    def convert_slot_to_time(self, slot: int) -> datetime.time:
+        total_mins = slot * self.precision
+        hour = total_mins // 60
+        minute = total_mins % 60
+        return hour, minute
+
     def preprocess_events(self, events_list: List[Event]) -> dict:
         processed_events = {}
         #Convert event start time, end time, and duration into time slots and store in dictionary of events
         for event in events_list:
-            start_slot = self.convert_time_to_slot(event.start_dt)
-            end_slot = self.convert_time_to_slot(event.end_dt)
+            start_slot = self.convert_time_to_slot(event.valid_start_dt)
+            end_slot = self.convert_time_to_slot(event.valid_end_dt)
             duration_slot = event.duration // self.precision
-            processed_events[event.google_id] = (duration_slot, start_slot, end_slot)
+            processed_events[event] = (duration_slot, start_slot, end_slot)
 
         return processed_events
 
-    def ILP_model_setup(self, dt: datetime):
+    def run_ILP_optimiser(self, dt: datetime):
         # Get current and next midnight (the start and end time for the day we are optimising)
         cur_midnight = DateTimeConverter().get_cur_midnight(dt)
         next_midnight = DateTimeConverter().get_next_midnight(dt)
@@ -929,82 +944,77 @@ class FlexEventOptimiser:
 
         processed_events = self.preprocess_events(events_list)
 
-        return processed_events
+
+        #Create minimisation problem
+        model = pulp.LpProblem("Minimise_Event_Clashes", pulp.LpMinimize)
+
+        #Set up decision variables
+        #x[i,t] = 1 if event i starts at time slot t, 0 otherwise
+        x = pulp.LpVariable.dicts(
+            "x",
+            ((i, t) for i in processed_events for t in range(self.num_slots)),
+            cat='Binary'
+        )
+
+        #o[i,j] = 1 if event i overlaps with event j, 0 otherwise
+        o = pulp.LpVariable.dicts(
+            "o",
+            ((i, j) for i in processed_events for j in processed_events if i.google_id < j.google_id),
+            cat='Binary'
+        )
+
+        #Constraints
+        #Each event should be scheduled exactly once within its valid time range
+        for i, data in processed_events.items():
+            duration_slot, start_slot, end_slot = data
+            model += (pulp.lpSum(x[i, t] for t in range(start_slot, end_slot - duration_slot + 1)) == 1,
+                      f"Event_{i}_scheduled_once")
+
+        #No overlapping events
+        for i, data_i in processed_events.items():
+            for j, data_j in processed_events.items():
+                if i.google_id >= j.google_id:
+                    continue
+
+                duration_i, start_i, end_i = data_i
+                duration_j, start_j, end_j = data_j
+
+                for t_i in range(start_i, end_i + 1):
+                    for t_j in range(start_j, end_j + 1):
+                        if (t_i < t_j + duration_j) and (t_j < t_i + duration_i):
+                            model += (o[i, j] >= x[i, t_i] + x[j, t_j] -1,
+                                      f"Overlap_{i}_{j}_at_{t_i}_{t_j}")
+
+        #Objective function: Minimise total overlaps
+        model += pulp.lpSum(o[i, j] for i, j in o), "Minimise_Total_Overlaps"
+
+        # solve the ILP model
+        solver = pulp.PULP_CBC_CMD()
+        model.solve(solver)
+
+        print("Status:", pulp.LpStatus[model.status])
+        print("Total overlaps:", pulp.value(model.objective))
+
+        #return list of events with their assigned optimal start times
+        for i in processed_events:
+            for t in range(self.num_slots):
+                if pulp.value(x[i, t]) == 1:
+                    hour, minute = self.convert_slot_to_time(t)
+                    duration = i.duration
+                    print(f"Event {i.summary} starts at slot {t} and ends at slot {t + processed_events[i][0]}")
+                    i.start_dt = i.start_dt.replace(hour=hour, minute=minute)
+                    print(f"Event {i.summary} starts at {i.start_dt.hour:02}:{i.start_dt.minute:02}")
+                    i.end_dt = i.start_dt + timedelta(minutes=duration)
+                    print(f"Event {i.summary} ends at {i.end_dt.hour:02}:{i.end_dt.minute:02}")
 
 
+        for i, j in o:
+            if pulp.value(o[i, j]) == 1:
+                print(f"Event {i.summary} overlaps with event {j.summary}")
 
 
+        return list(processed_events.keys())
 
-
-    @staticmethod
-    def move_events(flex_events, fixed_events) -> Tuple[List[FlexibleEvent], List[FlexibleEvent]]:
-        """
-        Moves flex events into valid slots (if no valid slots exist, a list of invalid events will be returned)
-        :param flex_events: List of flex events to be rearranged
-        :param fixed_events: List of fixed events to rearrange around
-        :return: Tuple: List of valid events after rearrangement, List of invalid events after rearrangement
-        """
-        invalid_events = []
-        valid_events = []
-
-        #Find a valid slot for each event
-        for event in flex_events:
-            slot_finder = FlexSlotFinder(event.valid_start_dt, event.valid_end_dt, event.duration)
-            new_start_dt, new_end_dt = slot_finder.find_valid_slot(fixed_events)
-            updated_event = FlexibleEvent(event.summary, new_start_dt, new_end_dt, event.valid_start_dt,
-                                          event.valid_end_dt, event.google_id)
-
-            #If a valid slot can be found without clashes, add to valid events list and to list of events to find slot around
-            if slot_finder.no_clashes:
-                valid_events.append(updated_event)
-                fixed_events.append(FixedEvent(updated_event.summary, updated_event.start_dt, updated_event.end_dt))
-                fixed_events.sort(key=lambda x: x.start_dt)
-
-            #Else, add to invalid events list
-            else:
-                invalid_events.append(updated_event)
-
-        return valid_events, invalid_events
-
-
-    def optimise_flex_events(self, dt: datetime) -> None:
-        """
-        Finds optimal slot for flex events on a given day
-        :param dt: Day to optimise flex events for
-        :return: None
-        """
-
-        #Get current and next midnight (the start and end time for the day we are optimising)
-        cur_midnight = DateTimeConverter().get_cur_midnight(dt)
-        next_midnight = DateTimeConverter().get_next_midnight(dt)
-
-        #Get list of all fixed events on day
-        fixed_events_st = Database().get_events(cur_midnight, next_midnight, EventType.FIXED)
-        fixed_events_et = copy.deepcopy(fixed_events_st)
-
-        #Get 2 lists of all flex events on day, one ordered by start time, one ordered by end time
-        flex_events_st = Database().get_events(cur_midnight, next_midnight, EventType.FLEXIBLE, OrderBy.START)
-        flex_events_et = Database().get_events(cur_midnight, next_midnight, EventType.FLEXIBLE, OrderBy.END)
-
-        #Move flex events to valid slots for each list
-        valid_events_st, invalid_events_st = self.move_events(flex_events_st, fixed_events_st)
-        valid_events_et, invalid_events_et = self.move_events(flex_events_et, fixed_events_et)
-
-
-        #For the list with more valid events, update the DB and GC with the new event times
-        em = EventManager()
-        if len(valid_events_st) > len(valid_events_et):
-            if len(invalid_events_st) > 0:
-                print(f"Invalid events found: {invalid_events_st}")
-
-            for event in valid_events_st:
-                em.edit_event(event)
-        else:
-            if len(invalid_events_st) > 0:
-                print(f"Invalid events found: {invalid_events_et}")
-
-            for event in valid_events_et:
-                em.edit_event(event)
 
 
 def print_events(events):
@@ -1019,40 +1029,61 @@ def print_events(events):
 
 
 def main():
-
-    """
-    dtc = DateTimeConverter()
-    dt = dtc.convert_str_to_dt("20-10-2025")
-    start_dt = dtc.get_cur_midnight(dt)
-    end_dt = dtc.get_next_midnight(dt)
-
-
     em = EventManager()
-    #em.sync_gc_to_db(start_dt, end_dt)
-
+    """
     fixed_eb = FixedEventBuilder()
-    new_fixed_event = fixed_eb.create_fixed_event("20-10-2025",
+    new_fixed_event = fixed_eb.create_fixed_event("27-10-2025",
                                          "19:00",
                                          "20:00",
                                                   "Test Fixed Event")
 
     eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("20-10-2025",
+    new_event = eb.create_flexible_event("27-10-2025",
+                                         "18:00",
                                          "19:00",
+                                         30,
+                                         "Test Flexible event 1")
+    em.submit_event(new_event)
+    new_event = eb.create_flexible_event("27-10-2025",
+                                         "18:00",
+                                         "21:30",
+                                         30,
+                                         "Test Flexible event 2")
+    em.submit_event(new_event)
+    new_event = eb.create_flexible_event("27-10-2025",
+                                         "19:00",
+                                         "21:00",
+                                         30,
+                                         "Test Flexible event 3")
+    em.submit_event(new_event)
+    new_event = eb.create_flexible_event("27-10-2025",
+                                         "18:30",
                                          "21:30",
                                          30,
                                          "Test Flexible event 4")
     #print(new_event)
     em.submit_event(new_fixed_event)
     em.submit_event(new_event)
-    """
+"""
+
     dtc = DateTimeConverter()
-    dt = dtc.convert_str_to_dt("20-10-2025")
+    dt = dtc.convert_str_to_dt("27-10-2025")
+    start_dt = dtc.get_cur_midnight(dt)
+    end_dt = dtc.get_next_midnight(dt)
+
+    em = EventManager()
+    em.sync_gc_to_db(start_dt, end_dt)
+
+
     optimiser = FlexEventOptimiser()
 
-    processed_events = optimiser.ILP_model_setup(dt)
+    processed_events = optimiser.run_ILP_optimiser(dt)
 
-    print(processed_events)
+    for e in processed_events:
+        if Database().event_status(e) == EventStatus.MODIFIED:
+            em.edit_event(e)
+
+
 
 
 

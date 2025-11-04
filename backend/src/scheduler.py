@@ -78,6 +78,19 @@ class Event(ABC):
     def duration(self) -> int:
         return int((self.end_dt - self.start_dt).total_seconds() // 60)
 
+    def to_json(self) -> dict:
+        return {
+            "summary": self.summary,
+            "date": self.start_dt.date().isoformat(),
+            "start_time": self.start_dt.time().isoformat(timespec='minutes'),
+            "end_time": self.end_dt.time().isoformat(timespec='minutes'),
+            "earliest_start": self.valid_start_dt.time().isoformat(timespec='minutes'),
+            "latest_end": self.valid_end_dt.time().isoformat(timespec='minutes'),
+            "duration_minutes": self.duration,
+            "is_flexible": self.is_flexible,
+            "google_id": self.google_id
+        }
+
     def get_start_end_dt(self) -> Tuple[datetime, datetime]:
         """
         Returns start_dt and end_dt
@@ -200,7 +213,7 @@ class FixedEventBuilder(EventBuilder):
             print(e)
             sys.exit(1)
 
-        clashes = Database().get_events_by_time(start_dt, end_dt, EventType.FIXED)
+        clashes = Database().get_events_in_date_range(start_dt, end_dt, EventType.FIXED)
         if len(clashes) > 0:
             print(f"This event would clash with the following fixed events:")
             for clash in clashes:
@@ -248,7 +261,7 @@ class FlexibleEventBuilder(EventBuilder):
 
 
         # Fetch list of all events in the valid window in chronological order
-        clashes = Database().get_events_by_time(valid_start_dt, valid_end_dt, EventType.ALL)
+        clashes = Database().get_events_in_date_range(valid_start_dt, valid_end_dt, EventType.ALL)
 
         try:
             slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
@@ -326,7 +339,7 @@ class Timezone(metaclass=Singleton):
 
 class Database(metaclass=Singleton):
 
-    def __init__(self, db_name="events.db") -> None:
+    def __init__(self, db_name=os.path.join(WORKING_DIR, "events.db")) -> None:
         self.db_name = db_name
         self.__create_table()
 
@@ -477,7 +490,7 @@ class Database(metaclass=Singleton):
         conn.close()
         print(f"Event {event.summary} deleted from database successfully")
 
-    def get_events_by_time(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
+    def get_events_in_date_range(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
         """
         Returns all events within the given time range
         :param from_dt: Start time
@@ -886,8 +899,8 @@ class EventManager:
         print(f"Submitted event {event.summary}")
 
     @staticmethod
-    def edit_event(event: Event) -> None:
-        Database().edit_event(event)
+    def edit_event(event: Event, update_valid_window: bool = False) -> None:
+        Database().edit_event(event, update_valid_window=update_valid_window)
         GoogleCalendar().edit_event(event)
 
     @staticmethod
@@ -993,7 +1006,7 @@ class FlexEventOptimiser:
         cur_midnight = DateTimeConverter().get_cur_midnight(dt)
         next_midnight = DateTimeConverter().get_next_midnight(dt)
 
-        events_list = Database().get_events_by_time(cur_midnight, next_midnight, EventType.ALL, OrderBy.START)
+        events_list = Database().get_events_in_date_range(cur_midnight, next_midnight, EventType.ALL, OrderBy.START)
 
         processed_events = self.preprocess_events(events_list)
 
@@ -1069,85 +1082,6 @@ class FlexEventOptimiser:
         return list(processed_events.keys())
 
 
-class RequestHandler:
-
-    @staticmethod
-    def _create_event_from_json(event_json: dict) -> Event:
-        #Create event object from json
-        if event_json['is_flexible']:
-            eb = FlexibleEventBuilder()
-            new_event = eb.create_flexible_event(event_json['date'],
-                                                 event_json['valid_start_time'],
-                                                 event_json['valid_end_time'],
-                                                 event_json['duration'],
-                                                 event_json['summary'])
-
-        else:
-            fixed_eb = FixedEventBuilder()
-            new_event = fixed_eb.create_fixed_event(event_json['date'],
-                                                    event_json['start_time'],
-                                                    event_json['end_time'],
-                                                    event_json['summary'])
-        return new_event
-
-    @staticmethod
-    def optimise_events(dt):
-        # Optimise flexible events for the day
-        optimiser = FlexEventOptimiser()
-        em = EventManager()
-        processed_events = optimiser.run_ILP_optimiser(dt)
-        for e in processed_events:
-            if Database().event_status(e) == EventStatus.MODIFIED:
-                em.edit_event(e)
-
-
-    def add_event(self, event_json: dict) -> None:
-
-        em = EventManager()
-        dtc = DateTimeConverter()
-
-        #Create event object from json
-        new_event = self._create_event_from_json(event_json)
-
-        #Submit event
-        em.submit_event(new_event)
-
-        #optimise events for the day
-        self.optimise_events(dtc.convert_str_to_dt(event_json['date']))
-
-
-    def edit_event(self, google_id: str, updated_event_json: dict) -> None:
-        #sync Google calendar and database
-        em = EventManager()
-        dtc = DateTimeConverter()
-
-        #Fetch existing event from db
-        existing_event = Database().get_event_by_google_id(google_id)
-
-        #update existing event using json data
-        #if event was flexible and now isn't, or vice versa, delete and re-add
-        if existing_event.is_flexible != updated_event_json['is_flexible']:
-            em.delete_event(existing_event)
-            self.add_event(updated_event_json)
-
-        else:
-            updated_event = self._create_event_from_json(updated_event_json)
-            updated_event.google_id = google_id
-            em.edit_event(updated_event)
-
-        #optimise events for the day
-        self.optimise_events(dtc.convert_str_to_dt(updated_event_json['date']))
-
-    @staticmethod
-    def del_event(google_id: str) -> None:
-
-        em = EventManager()
-        #Fetch existing event from db
-        existing_event = Database().get_event_by_google_id(google_id)
-
-        em.delete_event(existing_event)
-
-
 
 
 
@@ -1204,21 +1138,18 @@ def main():
 """
 
     dtc = DateTimeConverter()
-    dt = dtc.convert_str_to_dt("27-10-2025")
-    start_dt = dtc.get_cur_midnight(dt)
-    end_dt = dtc.get_next_midnight(dt)
+    dt = dtc.convert_str_to_dt("28-10-2025")
 
-    em = EventManager()
-    em.sync_gc_to_db(start_dt, end_dt)
+    handler = RequestHandler()
+    event_json = {
+        'is_flexible': False,
+        'date': "28-10-2025",
+        'start_time': "18:00",
+        'end_time': "18:30",
+        'summary': "Test edit event via handler"
+    }
 
-
-    optimiser = FlexEventOptimiser()
-
-    processed_events = optimiser.run_ILP_optimiser(dt)
-
-    for e in processed_events:
-        if Database().event_status(e) == EventStatus.MODIFIED:
-            em.edit_event(e)
+    handler.del_event('f09mgic1kil31hd682o0dm52c8')
 
 
 
@@ -1226,4 +1157,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    #create_table()

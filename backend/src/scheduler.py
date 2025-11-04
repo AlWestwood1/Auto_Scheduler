@@ -1081,79 +1081,8 @@ class FlexEventOptimiser:
 
         return list(processed_events.keys())
 
-
-
-
-
-def print_events(events):
-    #Prints list of events to the terminal (for debug purposes)
-    if not events:
-      print("No upcoming events found.")
-      return
-
-    for event in events:
-      start = event["start"].get("dateTime", event["start"].get("date"))
-      print(start, event["summary"])
-
-
-
-
-
 def main():
-    em = EventManager()
-    """
-    fixed_eb = FixedEventBuilder()
-    new_fixed_event = fixed_eb.create_fixed_event("27-10-2025",
-                                         "19:00",
-                                         "20:00",
-                                                  "Test Fixed Event")
-
-    eb = FlexibleEventBuilder()
-    new_event = eb.create_flexible_event("27-10-2025",
-                                         "18:00",
-                                         "19:00",
-                                         30,
-                                         "Test Flexible event 1")
-    em.submit_event(new_event)
-    new_event = eb.create_flexible_event("27-10-2025",
-                                         "18:00",
-                                         "21:30",
-                                         30,
-                                         "Test Flexible event 2")
-    em.submit_event(new_event)
-    new_event = eb.create_flexible_event("27-10-2025",
-                                         "19:00",
-                                         "21:00",
-                                         30,
-                                         "Test Flexible event 3")
-    em.submit_event(new_event)
-    new_event = eb.create_flexible_event("27-10-2025",
-                                         "18:30",
-                                         "21:30",
-                                         30,
-                                         "Test Flexible event 4")
-    #print(new_event)
-    em.submit_event(new_fixed_event)
-    em.submit_event(new_event)
-"""
-
-    dtc = DateTimeConverter()
-    dt = dtc.convert_str_to_dt("28-10-2025")
-
-    handler = RequestHandler()
-    event_json = {
-        'is_flexible': False,
-        'date': "28-10-2025",
-        'start_time': "18:00",
-        'end_time': "18:30",
-        'summary': "Test edit event via handler"
-    }
-
-    handler.del_event('f09mgic1kil31hd682o0dm52c8')
-
-
-
-
+    pass
 
 if __name__ == "__main__":
     main()

@@ -6,10 +6,8 @@ import sqlite3
 import sys
 from typing import Tuple, List
 from abc import ABC
-import copy
 from enum import Enum
 import pulp
-import itertools
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -19,6 +17,7 @@ from googleapiclient.errors import HttpError
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+WORKING_DIR = os.path.dirname(__file__)
 
 
 class Singleton(type):
@@ -201,7 +200,7 @@ class FixedEventBuilder(EventBuilder):
             print(e)
             sys.exit(1)
 
-        clashes = Database().get_events(start_dt, end_dt, EventType.FIXED)
+        clashes = Database().get_events_by_time(start_dt, end_dt, EventType.FIXED)
         if len(clashes) > 0:
             print(f"This event would clash with the following fixed events:")
             for clash in clashes:
@@ -249,7 +248,7 @@ class FlexibleEventBuilder(EventBuilder):
 
 
         # Fetch list of all events in the valid window in chronological order
-        clashes = Database().get_events(valid_start_dt, valid_end_dt, EventType.ALL)
+        clashes = Database().get_events_by_time(valid_start_dt, valid_end_dt, EventType.ALL)
 
         try:
             slot_finder = FlexSlotFinder(valid_start_dt, valid_end_dt, duration)
@@ -478,7 +477,7 @@ class Database(metaclass=Singleton):
         conn.close()
         print(f"Event {event.summary} deleted from database successfully")
 
-    def get_events(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
+    def get_events_by_time(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
         """
         Returns all events within the given time range
         :param from_dt: Start time
@@ -530,6 +529,37 @@ class Database(metaclass=Singleton):
 
         conn.close()
         return events
+
+    def get_event_by_google_id(self, google_id: str) -> Event:
+        """
+        Returns event with the given google_id
+        :param google_id: Google ID of event to fetch
+        :return: Event with given google_id
+        """
+
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+                       SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
+                       FROM events
+                       WHERE google_id = ?
+                       LIMIT 1
+                       ''', (google_id,))
+
+        event_data = cursor.fetchone()
+        conn.close()
+
+        if not event_data:
+            raise ValueError(f"No event found with google_id {google_id}")
+
+        if event_data[1] == 0:
+            return FixedEvent(event_data[0], datetime.fromisoformat(event_data[2]), datetime.fromisoformat(event_data[3]), event_data[6])
+        else:
+            return FlexibleEvent(
+                event_data[0], datetime.fromisoformat(event_data[2]), datetime.fromisoformat(event_data[3]),
+                datetime.fromisoformat(event_data[4]), datetime.fromisoformat(event_data[5]), event_data[6])
+
 
     def edit_event(self, event: Event, update_valid_window: bool = False) -> None:
         """
@@ -600,18 +630,18 @@ class Database(metaclass=Singleton):
 
 class GoogleCalendar(metaclass=Singleton):
     def __init__(self):
+        self.scopes = ["https://www.googleapis.com/auth/calendar"]
         self.creds = self.__authenticate()
         self.calendar_id = "primary"
 
-    @staticmethod
-    def __authenticate():
+    def __authenticate(self):
         # Creates the json access and refresh tokens to authenticate user to the application
         creds = None
         # The file token.json stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
         # time.
         if os.path.exists("token.json"):
-            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+            creds = Credentials.from_authorized_user_file(os.path.join(WORKING_DIR, "token.json"), self.scopes)
         # If there are no (valid) credentials available, let the user log in.
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
@@ -621,7 +651,7 @@ class GoogleCalendar(metaclass=Singleton):
                     print(f"Failed to refresh token: {e}")
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    "credentials.json", SCOPES
+                    os.path.join(WORKING_DIR, "credentials.json"), self.scopes
                 )
                 creds = flow.run_local_server(port=0)
             # Save the credentials for the next run
@@ -786,6 +816,24 @@ class GoogleCalendar(metaclass=Singleton):
         ).execute()
         print(f"Event {event.summary} updated")
 
+    def delete_event(self, event: Event) -> None:
+        """
+        Deletes an event from the Google Calendar
+        :param event: Event to delete
+        :return: None
+        """
+        if not self.event_exists(event.google_id):
+            raise ValueError(f"Event {event.summary} does not exist in Google Calendar")
+
+        service = build("calendar", "v3", credentials=self.creds)
+
+        service.events().delete(
+            calendarId=self.calendar_id,
+            eventId=event.google_id
+        ).execute()
+
+        print(f"Event {event.summary} deleted from Google Calendar")
+
 class EventManager:
     """
     Class to manage alignment of events in Google calendar and database
@@ -841,6 +889,11 @@ class EventManager:
     def edit_event(event: Event) -> None:
         Database().edit_event(event)
         GoogleCalendar().edit_event(event)
+
+    @staticmethod
+    def delete_event(event: Event) -> None:
+        Database().del_event(event)
+        GoogleCalendar().delete_event(event)
 
 
 class DateTimeConverter:
@@ -940,7 +993,7 @@ class FlexEventOptimiser:
         cur_midnight = DateTimeConverter().get_cur_midnight(dt)
         next_midnight = DateTimeConverter().get_next_midnight(dt)
 
-        events_list = Database().get_events(cur_midnight, next_midnight, EventType.ALL, OrderBy.START)
+        events_list = Database().get_events_by_time(cur_midnight, next_midnight, EventType.ALL, OrderBy.START)
 
         processed_events = self.preprocess_events(events_list)
 
@@ -1016,6 +1069,87 @@ class FlexEventOptimiser:
         return list(processed_events.keys())
 
 
+class RequestHandler:
+
+    @staticmethod
+    def _create_event_from_json(event_json: dict) -> Event:
+        #Create event object from json
+        if event_json['is_flexible']:
+            eb = FlexibleEventBuilder()
+            new_event = eb.create_flexible_event(event_json['date'],
+                                                 event_json['valid_start_time'],
+                                                 event_json['valid_end_time'],
+                                                 event_json['duration'],
+                                                 event_json['summary'])
+
+        else:
+            fixed_eb = FixedEventBuilder()
+            new_event = fixed_eb.create_fixed_event(event_json['date'],
+                                                    event_json['start_time'],
+                                                    event_json['end_time'],
+                                                    event_json['summary'])
+        return new_event
+
+    @staticmethod
+    def optimise_events(dt):
+        # Optimise flexible events for the day
+        optimiser = FlexEventOptimiser()
+        em = EventManager()
+        processed_events = optimiser.run_ILP_optimiser(dt)
+        for e in processed_events:
+            if Database().event_status(e) == EventStatus.MODIFIED:
+                em.edit_event(e)
+
+
+    def add_event(self, event_json: dict) -> None:
+
+        em = EventManager()
+        dtc = DateTimeConverter()
+
+        #Create event object from json
+        new_event = self._create_event_from_json(event_json)
+
+        #Submit event
+        em.submit_event(new_event)
+
+        #optimise events for the day
+        self.optimise_events(dtc.convert_str_to_dt(event_json['date']))
+
+
+    def edit_event(self, google_id: str, updated_event_json: dict) -> None:
+        #sync Google calendar and database
+        em = EventManager()
+        dtc = DateTimeConverter()
+
+        #Fetch existing event from db
+        existing_event = Database().get_event_by_google_id(google_id)
+
+        #update existing event using json data
+        #if event was flexible and now isn't, or vice versa, delete and re-add
+        if existing_event.is_flexible != updated_event_json['is_flexible']:
+            em.delete_event(existing_event)
+            self.add_event(updated_event_json)
+
+        else:
+            updated_event = self._create_event_from_json(updated_event_json)
+            updated_event.google_id = google_id
+            em.edit_event(updated_event)
+
+        #optimise events for the day
+        self.optimise_events(dtc.convert_str_to_dt(updated_event_json['date']))
+
+    @staticmethod
+    def del_event(google_id: str) -> None:
+
+        em = EventManager()
+        #Fetch existing event from db
+        existing_event = Database().get_event_by_google_id(google_id)
+
+        em.delete_event(existing_event)
+
+
+
+
 
 def print_events(events):
     #Prints list of events to the terminal (for debug purposes)
@@ -1026,6 +1160,9 @@ def print_events(events):
     for event in events:
       start = event["start"].get("dateTime", event["start"].get("date"))
       print(start, event["summary"])
+
+
+
 
 
 def main():

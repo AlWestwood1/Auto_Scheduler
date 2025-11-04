@@ -467,7 +467,7 @@ class TestDatabase(unittest.TestCase):
         from_dt = datetime(2025, 8, 5, 12, 0, tzinfo=self.tz)
         to_dt = datetime(2025, 8, 5, 11, 0, tzinfo=self.tz)
         with self.assertRaises(ValueError):
-            self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+            self.db.get_events_by_time(from_dt, to_dt, scheduler.EventType.ALL)
 
     def test_get_events_returns_correct_events(self):
         # Create two fixed and one flexible event
@@ -488,16 +488,16 @@ class TestDatabase(unittest.TestCase):
         print(f"From: {from_dt}, To: {to_dt}")
 
         # Get all events
-        all_events = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+        all_events = self.db.get_events_by_time(from_dt, to_dt, scheduler.EventType.ALL)
         self.assertEqual(len(all_events), 3)
         # Get only fixed events
-        fixed_events = self.db.get_events(from_dt, to_dt, event_type=scheduler.EventType.FIXED)
+        fixed_events = self.db.get_events_by_time(from_dt, to_dt, event_type=scheduler.EventType.FIXED)
         print(fixed_events)
         self.assertTrue(all(isinstance(e, scheduler.FixedEvent) for e in fixed_events))
         self.assertEqual(len(fixed_events), 2)
 
         # Get only flexible events
-        flex_events = self.db.get_events(from_dt, to_dt, scheduler.EventType.FLEXIBLE)
+        flex_events = self.db.get_events_by_time(from_dt, to_dt, scheduler.EventType.FLEXIBLE)
         print(flex_events)
         self.assertTrue(all(isinstance(e, scheduler.FlexibleEvent) for e in flex_events))
         self.assertEqual(len(flex_events), 1)
@@ -523,14 +523,14 @@ class TestDatabase(unittest.TestCase):
         from_dt = datetime(2025, 8, 5, 0, 0, tzinfo=self.tz)
         to_dt = datetime(2025, 8, 6, 0, 0, tzinfo=self.tz)
 
-        events = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL)
+        events = self.db.get_events_by_time(from_dt, to_dt, scheduler.EventType.ALL)
         self.assertEqual(len(events), 3)
         self.assertEqual(events[0].summary, "Event 2")
         self.assertEqual(events[1].summary, "Event 1")
         self.assertEqual(events[2].summary, "Event 3")
 
         # Check order by End date
-        events_desc = self.db.get_events(from_dt, to_dt, scheduler.EventType.ALL, order_by=scheduler.OrderBy.END)
+        events_desc = self.db.get_events_by_time(from_dt, to_dt, scheduler.EventType.ALL, order_by=scheduler.OrderBy.END)
         self.assertEqual(len(events_desc), 3)
         self.assertEqual(events_desc[0].summary, "Event 2")
         self.assertEqual(events_desc[1].summary, "Event 3")
@@ -660,11 +660,11 @@ class TestEventManager(unittest.TestCase):
         self.tz = zoneinfo.ZoneInfo(get_localzone_name())
 
         self.cur_events = [scheduler.FixedEvent("Event 1",
-                                                  datetime(2025, 8, 5, 12, 0, tzinfo=self.tz),
-                                                  datetime(2025, 8, 5, 13, 0, tzinfo=self.tz)),
-                             scheduler.FixedEvent("Event 2",
-                                                  datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
-                                                  datetime(2025, 8, 5, 20, 0, tzinfo=self.tz))]
+                                                datetime(2025, 8, 5, 12, 0, tzinfo=self.tz),
+                                                datetime(2025, 8, 5, 13, 0, tzinfo=self.tz)),
+                           scheduler.FixedEvent("Event 2",
+                                                datetime(2025, 8, 5, 14, 0, tzinfo=self.tz),
+                                                datetime(2025, 8, 5, 20, 0, tzinfo=self.tz))]
 
         self.del_events = [scheduler.FixedEvent("Del Event 1",
                                                 datetime(2025, 8, 5, 13, 0, tzinfo=self.tz),
@@ -721,6 +721,7 @@ class TestEventManager(unittest.TestCase):
 
         # Assert add_event was called with the new event
         assert mock_del_event.call_count == len(self.cur_events)
+
 
 
 class TestDateTimeConverter(unittest.TestCase):

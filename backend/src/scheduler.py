@@ -193,8 +193,8 @@ class FixedEventBuilder(EventBuilder):
     """
     Builder class for fixed events
     """
-
-    def create_fixed_event(self, date_str: str, start_time_str: str, end_time_str: str, summary: str) -> FixedEvent:
+    @staticmethod
+    def create_fixed_event(start_time_str: str, end_time_str: str, summary: str) -> FixedEvent:
         """
         Creates a fixed event from the input parameters
         :param date_str: String representation of the event date
@@ -208,11 +208,14 @@ class FixedEventBuilder(EventBuilder):
 
         #Generate datetime representation of start and end dates
         try:
-            start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
+            start_dt = datetime.fromisoformat(start_time_str)
+            end_dt = datetime.fromisoformat(end_time_str)
+            #start_dt, end_dt = self._generate_dts(date_str, start_time_str, end_time_str)
         except ValueError as e:
             print(e)
             sys.exit(1)
 
+        """
         clashes = Database().get_events_in_date_range(start_dt, end_dt, EventType.FIXED)
         if len(clashes) > 0:
             print(f"This event would clash with the following fixed events:")
@@ -227,7 +230,7 @@ class FixedEventBuilder(EventBuilder):
                     print('Invalid input - please try again')
                 else:
                     valid = True
-
+        """
 
         #Create and return FixedEvent
         return FixedEvent(summary, start_dt, end_dt)
@@ -238,7 +241,7 @@ class FlexibleEventBuilder(EventBuilder):
     Builder class for flexible events
     """
 
-    def create_flexible_event(self, date_str: str, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
+    def create_flexible_event(self, valid_start_time_str: str, valid_end_time_str: str, duration: int, summary: str) -> FlexibleEvent:
         """
         Creates a flexible event from the input parameters
         :param date_str: String representation of the event date
@@ -254,7 +257,9 @@ class FlexibleEventBuilder(EventBuilder):
 
         #Generate valid timerange datetimes from the valid start and end dates/times
         try:
-            valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
+            valid_start_dt = datetime.fromisoformat(valid_start_time_str)
+            valid_end_dt = datetime.fromisoformat(valid_end_time_str)
+            #valid_start_dt, valid_end_dt = self._generate_dts(date_str, valid_start_time_str, valid_end_time_str)
         except ValueError as e:
             print(e)
             sys.exit(1)
@@ -490,6 +495,50 @@ class Database(metaclass=Singleton):
         conn.close()
         print(f"Event {event.summary} deleted from database successfully")
 
+    @staticmethod
+    def __create_event_from_db_query(db_query:List[tuple]) -> List[Event]:
+        events = []
+        for event in db_query:
+            if event[1] == 0:
+                events.append(
+                    FixedEvent(event[0], datetime.fromisoformat(event[2]), datetime.fromisoformat(event[3]), event[6]))
+            else:
+                events.append(
+                    FlexibleEvent(event[0], datetime.fromisoformat(event[2]), datetime.fromisoformat(event[3]),
+                                  datetime.fromisoformat(event[4]), datetime.fromisoformat(event[5]), event[6]))
+
+        return events
+
+    def get_upcoming_events(self, num_events: int = 50, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+
+        # If event type is all, the is_flexible filter is not needed
+        if event_type == EventType.ALL:
+            cursor.execute(f"""
+                                   SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
+                                   FROM events
+                                   WHERE event_end_dt >= ?
+                                   ORDER BY {order_by.value}
+                                   LIMIT ?""",
+                           (datetime.now().isoformat(), num_events,))
+
+        else:
+            cursor.execute(f"""
+                                   SELECT summary, is_flexible, event_start_dt, event_end_dt, valid_start_dt, valid_end_dt, google_id
+                                   FROM events
+                                   WHERE (is_flexible = ?)
+                                    AND (event_end_dt >= ?)
+                                   ORDER BY {order_by.value}
+                                   LIMIT ?""",
+                           (event_type.value, datetime.now().isoformat(), num_events,))
+
+        # Create a list of events from the DB query results
+        events = self.__create_event_from_db_query(cursor.fetchall())
+        conn.close()
+
+        return events
+
     def get_events_in_date_range(self, from_dt: datetime, to_dt: datetime, event_type: EventType = EventType.ALL, order_by: OrderBy = OrderBy.START) -> List[Event]:
         """
         Returns all events within the given time range
@@ -531,16 +580,9 @@ class Database(metaclass=Singleton):
                            (event_type.value, from_dt.isoformat(), to_dt.isoformat(), from_dt.isoformat(), to_dt.isoformat()))
 
         #Create a list of events from the DB query results
-        events = []
-        for event in cursor.fetchall():
-            if event[1] == 0:
-                events.append(FixedEvent(event[0], datetime.fromisoformat(event[2]), datetime.fromisoformat(event[3]), event[6]))
-            else:
-                events.append(
-                    FlexibleEvent(event[0], datetime.fromisoformat(event[2]), datetime.fromisoformat(event[3]),
-                                  datetime.fromisoformat(event[4]), datetime.fromisoformat(event[5]), event[6]))
-
+        events = self.__create_event_from_db_query(cursor.fetchall())
         conn.close()
+
         return events
 
     def get_event_by_google_id(self, google_id: str) -> Event:
@@ -726,7 +768,7 @@ class GoogleCalendar(metaclass=Singleton):
             print(f"An error occurred: {error}")
             sys.exit(1)
 
-    def __get_events_json(self, start_dt: datetime, end_dt: datetime, get_deleted=False) -> List[dict]:
+    def __get_events_json(self, start_dt: datetime = datetime.now(), end_dt: datetime = None, get_deleted=False, in_range: bool = False, max_results: int = 50) -> List[dict]:
         """
         Fetches JSON of events in a given time range from Google Calendar API
         :param start_dt: Start datetime
@@ -735,7 +777,13 @@ class GoogleCalendar(metaclass=Singleton):
         """
 
         start_formatted = start_dt.isoformat() + 'Z'
-        end_formatted = end_dt.isoformat() + 'Z'
+        end_formatted = None
+
+        if in_range:
+            if not end_dt:
+                raise ValueError("End datetime must be provided if in_range is True")
+
+            end_formatted = end_dt.isoformat() + 'Z'
 
         try:
             service = build("calendar", "v3", credentials=self.creds)
@@ -745,6 +793,7 @@ class GoogleCalendar(metaclass=Singleton):
                 calendarId=GoogleCalendar().calendar_id,
                 timeMin=start_formatted,
                 timeMax=end_formatted,
+                maxResults=max_results,
                 singleEvents=True,
                 showDeleted=get_deleted,
                 orderBy='startTime'
@@ -758,20 +807,20 @@ class GoogleCalendar(metaclass=Singleton):
             print(f"An HTTP error occurred: {error}")
             sys.exit(1)
 
-    def get_events(self, start_dt: datetime, end_dt: datetime) -> tuple[List[FixedEvent], List[FixedEvent]]:
+    def get_events(self, start_dt: datetime = datetime.now(), end_dt: datetime = None, in_range: bool = False) -> tuple[List[FixedEvent], List[FixedEvent]]:
         """
         Returns list of current and deleted events in a given time range from the Google Calendar
+        :param in_range: Whether to get events in a specific time range
         :param start_dt: Start datetime
         :param end_dt: End datetime
         :return: Tuple: List of current events, List of deleted events
         """
-        print(start_dt, end_dt)
-        if not start_dt < end_dt:
-            print('error')
+
+        if in_range and not start_dt < end_dt:
             raise ValueError("Start date/time must be before end date/time")
 
         #Get list of events from API
-        events_json = self.__get_events_json(start_dt, end_dt, get_deleted=True)
+        events_json = self.__get_events_json(start_dt, end_dt, get_deleted=True, in_range=in_range)
 
         current_events = []
         deleted_events = []
@@ -852,15 +901,16 @@ class EventManager:
     Class to manage alignment of events in Google calendar and database
     """
     @staticmethod
-    def sync_gc_to_db(start_dt: datetime, end_dt: datetime) -> None:
+    def sync_gc_to_db(in_range: bool = False, start_dt: datetime = datetime.now(), end_dt: datetime = None) -> None:
         """
         Adds existing events from the Google calendar in a given time range to the DB
+        :param in_range: Whether to sync events in a specific time range
         :param start_dt: Start datetime
         :param end_dt: End datetime
         :return: None
         """
         # Get list of all events on day from Google calendar
-        cur_events, del_events = GoogleCalendar().get_events(start_dt, end_dt)
+        cur_events, del_events = GoogleCalendar().get_events(start_dt, end_dt, in_range=in_range)
 
         if not cur_events and not del_events:
             raise ValueError("No events found in Google Calendar in the given time range")

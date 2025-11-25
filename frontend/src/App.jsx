@@ -1,5 +1,5 @@
 // javascript
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import api from "./api.js"
 import "./App.css"; // We'll add some styles for the modal here
 
@@ -20,19 +20,21 @@ function App() {
   const [formData, setFormData] = useState(empty_event);
   const [showModal, setShowModal] = useState(false);
 
-  // Fetch events on load
-  useEffect(() => {
-    fetchEvents();
-  }, []);
 
-  const fetchEvents = async () => {
+  const fetchEvents = useCallback(async () => {
     try {
       const response = await api.get("/events");
       setEvents(response.data.events);
     } catch (error) {
       console.error("Error fetching events:", error);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchEvents();
+    const intervalId = setInterval(fetchEvents, 30000); // 30,000 ms = 30s
+    return () => clearInterval(intervalId);
+  }, [fetchEvents]);
 
   // Generic handler that supports checkboxes and numbers
   const handleChange = (e) => {
